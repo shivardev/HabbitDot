@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">HabbitDot mark</title>
+  <desc id="desc">A four by four habit grid with a lime pixel H and one white dot.</desc>
+  <rect width="1024" height="1024" rx="224" fill="#0B0D10"/>
+  <g fill="#30363D">
+    <rect x="184" y="184" width="145" height="145" rx="32"/><rect x="354" y="184" width="145" height="145" rx="32"/><rect x="524" y="184" width="145" height="145" rx="32"/><rect x="694" y="184" width="145" height="145" rx="32"/>
+    <rect x="184" y="354" width="145" height="145" rx="32"/><rect x="354" y="354" width="145" height="145" rx="32"/><rect x="524" y="354" width="145" height="145" rx="32"/><rect x="694" y="354" width="145" height="145" rx="32"/>
+    <rect x="184" y="524" width="145" height="145" rx="32"/><rect x="354" y="524" width="145" height="145" rx="32"/><rect x="524" y="524" width="145" height="145" rx="32"/><rect x="694" y="524" width="145" height="145" rx="32"/>
+    <rect x="184" y="694" width="145" height="145" rx="32"/><rect x="354" y="694" width="145" height="145" rx="32"/><rect x="524" y="694" width="145" height="145" rx="32"/><rect x="694" y="694" width="145" height="145" rx="32"/>
+  </g>
+  <g fill="#B7F171">
+    <rect x="184" y="184" width="145" height="145" rx="32"/><rect x="694" y="184" width="145" height="145" rx="32"/>
+    <rect x="184" y="354" width="145" height="145" rx="32"/><rect x="694" y="354" width="145" height="145" rx="32"/>
+    <rect x="184" y="524" width="145" height="145" rx="32"/><rect x="354" y="524" width="145" height="145" rx="32"/><rect x="524" y="524" width="145" height="145" rx="32"/><rect x="694" y="524" width="145" height="145" rx="32"/>
+    <rect x="184" y="694" width="145" height="145" rx="32"/><rect x="694" y="694" width="145" height="145" rx="32"/>
+  </g>
+  <circle cx="767" cy="257" r="29" fill="#F7F8F4"/>
+</svg>

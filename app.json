@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "HabbitDot",
-    "slug": "HabbitDot",
+    "slug": "habbitdot",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -10,6 +10,12 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "app.habbitdot.mobile",
+      "permissions": [
+        "POST_NOTIFICATIONS",
+        "SCHEDULE_EXACT_ALARM",
+        "RECEIVE_BOOT_COMPLETED"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -20,6 +26,18 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-sqlite",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#B7F171",
+          "defaultChannel": "habit-reminders"
+        }
+      ],
+      "@react-native-community/datetimepicker"
+    ]
   }
 }

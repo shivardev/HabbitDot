@@ -39,3 +39,22 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Release artifacts
+*.apk
+*.aab
+
+# Local Android configuration
+local.properties
+
+# Local workspace and agent notes
+/.ai/
+/.claude/
+/CLAUDE.md
+/AGENTS.md
+/JOURNEY.md
+
+# Local captures and diagnostics
+/*.png
+/*.db
+/*.log
