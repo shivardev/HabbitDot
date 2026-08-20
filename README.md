@@ -1,97 +1,120 @@
-# HabbitDot
+<div align="center">
+  <img src="assets/icon.png" alt="HabbitDot app icon" width="112" />
 
-HabbitDot is an offline-first habit tracker for Android and iOS, built with Expo, React Native, TypeScript, and SQLite. It combines fast daily check-ins, flexible dose-style targets, local reminders, history grids, and a private analytics dashboard - all without an account or backend.
+  # HabbitDot
 
-## Highlights
+  **A private, offline-first habit tracker built for consistency—not attention.**
 
-- Multiple check-ins per habit and day (`1x` through `20x`)
-- Exact-time local reminders with notification actions and ten-minute snooze
-- Goal-aware reminders that stop once today's target is complete
-- Calendar and contribution-grid history
-- Local analytics for completion rate, perfect days, streaks, trends, weekdays, and individual habits
-- Fully local SQLite storage; no advertising or analytics SDK
-- Expo Go workflow for fast UI development and native development/release builds for notification testing
+  Track daily habits, set multi-check-in goals, schedule smart reminders, and understand your progress. No account, no ads, and no cloud database.
+
+  [![Download APK](https://img.shields.io/badge/Download-Android_APK-B7F171?style=for-the-badge&logo=android&logoColor=111111)](https://github.com/shivardev/HabbitDot/releases/latest/download/HabbitDot.apk)
+
+  [![Latest release](https://img.shields.io/github/v/release/shivardev/HabbitDot?style=flat-square&color=B7F171)](https://github.com/shivardev/HabbitDot/releases/latest)
+  [![CI](https://img.shields.io/github/actions/workflow/status/shivardev/HabbitDot/ci.yml?branch=main&style=flat-square&label=build)](https://github.com/shivardev/HabbitDot/actions/workflows/ci.yml)
+  [![License: MIT](https://img.shields.io/badge/license-MIT-8D49B0?style=flat-square)](LICENSE)
+  [![Expo SDK 57](https://img.shields.io/badge/Expo_SDK-57-111111?style=flat-square&logo=expo)](https://docs.expo.dev/versions/v57.0.0/)
+</div>
+
+## See it in action
+
+<p align="center">
+  <img src="docs/screenshots/today.png" alt="HabbitDot daily habit dashboard" width="30%" />
+  &nbsp;
+  <img src="docs/screenshots/habit-details.png" alt="Habit history, target, and reminder settings" width="30%" />
+  &nbsp;
+  <img src="docs/screenshots/analytics.png" alt="Private on-device habit analytics" width="30%" />
+</p>
+
+<p align="center"><sub>Demo data only. HabbitDot never uploads your habit names or history.</sub></p>
+
+## Why HabbitDot?
+
+- **Fast daily check-ins** — record progress with one tap, including goals from 1× to 20× per day.
+- **Reminders that understand your goal** — schedule multiple exact-time reminders; they stop after today's target is complete.
+- **History you can read at a glance** — contribution grids and monthly calendars show both partial and completed days.
+- **Useful local analytics** — review completion rate, perfect days, streaks, trends, weekdays, and per-habit performance.
+- **Private by design** — your data stays in the app's local SQLite database. There is no account, telemetry, advertising, or analytics SDK.
+- **Works offline** — the core experience needs no backend and no internet connection.
+
+## Download for Android
+
+### [Download the latest APK →](https://github.com/shivardev/HabbitDot/releases/latest/download/HabbitDot.apk)
+
+On Android, allow installation from your browser or file manager when prompted, then open the downloaded `HabbitDot.apk`. Existing users can install a newer APK over the current app to preserve local history. Uninstalling HabbitDot removes its on-device data.
+
+> iOS builds are not distributed here. Developers can run the iOS project locally with Xcode.
 
 ## Technology
 
 | Layer | Choice |
 | --- | --- |
-| Application | React Native 0.86 + React 19 |
-| Toolchain | Expo SDK 57 |
+| App | React Native 0.86 + React 19 |
+| Toolchain | Expo SDK 57 + Continuous Native Generation |
 | Language | Strict TypeScript |
-| Persistence | `expo-sqlite` |
-| Notifications | `expo-notifications` |
+| Storage | `expo-sqlite` |
+| Reminders | `expo-notifications` |
 | Time input | Native date/time picker |
 
-## Getting started
+## Run locally
 
-Requirements:
-
-- Node.js 22 or newer
-- npm
-- Expo Go for UI iteration, or Android Studio/Android SDK for native builds
+Requirements: Node.js 22 or newer, npm, and either Expo Go or an Android/iOS native toolchain.
 
 ```sh
 git clone https://github.com/shivardev/HabbitDot.git
 cd HabbitDot
 npm ci
-npm run typecheck
+npm run check
 npm start
 ```
 
-Open the displayed development URL in Expo Go. Expo Go uses its own sandboxed database, separate from an installed HabbitDot build.
+Scan the displayed QR code with Expo Go for quick UI development. Expo Go has a separate sandboxed database from an installed HabbitDot build.
 
-### Native Android development
+For an Android development build:
 
 ```sh
 npm run android
 ```
 
-Local notifications work in installed development and release builds. Remote push notifications are not supported by Expo Go on Android; HabbitDot currently uses local notifications.
+Local notification behavior should be tested in an installed development or release build. HabbitDot does not use remote push notifications.
 
-### Release APK
+## Build an installable APK
 
-The repository uses Expo Continuous Native Generation, so `android/` and `ios/` are generated and intentionally ignored.
-
-```powershell
-npx expo prebuild --clean --platform android
-```
-
-Then build from Linux or WSL with an Android SDK configured:
+The `preview` EAS profile produces an APK, while the `production` profile produces the Android store artifact.
 
 ```sh
-cd android
-./gradlew assembleRelease
+npm install --global eas-cli
+eas login
+eas build --platform android --profile preview
 ```
 
-The APK is written to `android/app/build/outputs/apk/release/app-release.apk`. To upgrade a connected device without deleting its SQLite data:
+To publish a downloaded build as a GitHub release:
 
 ```sh
-adb install -r android/app/build/outputs/apk/release/app-release.apk
+gh release create v1.0.0 ./HabbitDot.apk \
+  --repo shivardev/HabbitDot \
+  --title "HabbitDot v1.0.0" \
+  --notes-from-tag
 ```
 
-Never uninstall the existing app when testing data-preserving upgrades; uninstalling removes app-local data.
+The native `android/` and `ios/` folders are generated by Expo and intentionally not committed.
 
 ## Project structure
 
 ```text
 App.tsx                    App shell, habit screens, and navigation
-src/AnalyticsScreen.tsx    Memoized local analytics and dashboard UI
+src/AnalyticsScreen.tsx    On-device analytics dashboard
 src/database.ts            SQLite schema, migrations, and repositories
 src/notifications.ts       Reminder scheduling and notification actions
-assets/                    Application icons and splash assets
+assets/                    App icons and brand assets
+docs/                      Architecture notes and product screenshots
 ```
 
-See [Architecture](docs/ARCHITECTURE.md) for data flow and design decisions.
-
-## Privacy
-
-HabbitDot stores habit names, schedules, and completion history only in the application's local SQLite database. It has no account system, remote API, telemetry, advertising, or third-party analytics. See [Privacy](PRIVACY.md).
+Read [Architecture](docs/ARCHITECTURE.md) for the data flow and design decisions, and [Privacy](PRIVACY.md) for the plain-language privacy policy.
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Please report security-sensitive issues according to [SECURITY.md](SECURITY.md).
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report security-sensitive issues according to [SECURITY.md](SECURITY.md).
 
 ## License
 
-HabbitDot is available under the [MIT License](LICENSE).
+HabbitDot is open source under the [MIT License](LICENSE).

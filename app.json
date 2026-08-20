@@ -2,6 +2,7 @@
   "expo": {
     "name": "HabbitDot",
     "slug": "habbitdot",
+    "owner": "blazingbane",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -11,6 +12,7 @@
     },
     "android": {
       "package": "app.habbitdot.mobile",
+      "versionCode": 1,
       "permissions": [
         "POST_NOTIFICATIONS",
         "SCHEDULE_EXACT_ALARM",
@@ -38,6 +40,11 @@
         }
       ],
       "@react-native-community/datetimepicker"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "1721250f-ea1e-4773-a48d-465f9c3905d5"
+      }
+    }
   }
 }

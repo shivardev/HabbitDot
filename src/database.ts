@@ -19,26 +19,6 @@ export async function initializeDatabase() {
   `);
   try { await db.execAsync('ALTER TABLE habits ADD COLUMN daily_goal INTEGER NOT NULL DEFAULT 1'); } catch {}
   try { await db.execAsync('ALTER TABLE habit_entries ADD COLUMN completion_count INTEGER NOT NULL DEFAULT 1'); } catch {}
-  const finasterideRows = await db.getAllAsync<{ id: number }>("SELECT id FROM habits WHERE lower(trim(name)) = 'finasteride' AND archived_at IS NULL ORDER BY id DESC");
-  if (finasterideRows.length > 1) {
-    const keepId = finasterideRows[0].id;
-    const duplicateList = finasterideRows.slice(1).map(({ id }) => id).join(',');
-    await db.withTransactionAsync(async () => {
-      await db.execAsync(`
-        INSERT INTO habit_entries(habit_id, entry_date, completed_at, completion_count)
-        SELECT ${keepId}, entry_date, MAX(completed_at), MAX(completion_count)
-        FROM habit_entries WHERE habit_id IN (${keepId},${duplicateList}) GROUP BY entry_date
-        ON CONFLICT(habit_id, entry_date) DO UPDATE SET
-          completed_at = MAX(habit_entries.completed_at, excluded.completed_at),
-          completion_count = MAX(habit_entries.completion_count, excluded.completion_count);
-        DELETE FROM habits WHERE id IN (${duplicateList});
-      `);
-    });
-  }
-  const existingFinasteride = await db.getFirstAsync<{ id: number }>("SELECT id FROM habits WHERE lower(trim(name)) = 'finasteride' AND archived_at IS NULL LIMIT 1");
-  if (!existingFinasteride) await db.runAsync("INSERT INTO habits(name, color, created_at, daily_goal) VALUES ('Finasteride', '#B7F171', ?, 1)", new Date().toISOString());
-  const finasteride = existingFinasteride ?? await db.getFirstAsync<{ id: number }>("SELECT id FROM habits WHERE lower(trim(name)) = 'finasteride' AND archived_at IS NULL LIMIT 1");
-  if (finasteride) await db.runAsync('INSERT INTO habit_reminders(habit_id, hour, minute, enabled) SELECT ?, 23, 30, 1 WHERE NOT EXISTS (SELECT 1 FROM habit_reminders WHERE habit_id = ?)', finasteride.id, finasteride.id);
 }
 
 type HabitRow = { id: number; name: string; color: string; createdAt: string; dailyGoal: number; reminderHour: number | null; reminderMinute: number | null; reminderEnabled: number };
@@ -82,7 +62,6 @@ export async function incrementEntry(habitId: number, entryDate: string) {
     ON CONFLICT(habit_id, entry_date) DO UPDATE SET completion_count = MIN(completion_count + 1, (SELECT daily_goal FROM habits WHERE id = ?)), completed_at = excluded.completed_at`, habitId, entryDate, new Date().toISOString(), habitId);
 }
 
-export async function getFinasterideHabit() { const db = await getDatabase(); return db.getFirstAsync<{ id: number; name: string }>("SELECT id, name FROM habits WHERE lower(name) = 'finasteride' LIMIT 1"); }
 export async function getSetting(key: string) { const db = await getDatabase(); return (await db.getFirstAsync<{ value: string }>('SELECT value FROM app_settings WHERE key = ?', key))?.value ?? null; }
 export async function setSetting(key: string, value: string) { const db = await getDatabase(); await db.runAsync('INSERT INTO app_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, value); }
 export async function updateDailyGoal(habitId: number, dailyGoal: number) { const db = await getDatabase(); await db.runAsync('UPDATE habits SET daily_goal = ? WHERE id = ?', Math.max(1, Math.min(20, dailyGoal)), habitId); }
