@@ -3,8 +3,8 @@ import { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { addHabit, getHabits, Habit, initializeDatabase, replaceHabitReminders, toggleEntry, updateDailyGoal, updateHabit, updatePrimaryReminder } from './src/database';
-import { configureNotifications, listenForNotificationActions } from './src/notifications';
+import { addHabit, getHabits, getSetting, Habit, initializeDatabase, replaceHabitReminders, setSetting, toggleEntry, updateDailyGoal, updateHabit, updatePrimaryReminder } from './src/database';
+import { configureNotifications, listenForNotificationActions, scheduleDeliveryVerification } from './src/notifications';
 import { AnalyticsScreen } from './src/AnalyticsScreen';
 
 const COLORS = ['#B7F171', '#B79CFF', '#FFB86B', '#7CE7D5', '#FF91AF', '#FF5D62', '#F3C51D', '#2DB26B', '#4CA9D8', '#2D82B7', '#CE1981', '#8D49B0'];
@@ -203,7 +203,17 @@ export default function App() {
 
   useEffect(() => {
     let notificationSubscription: { remove: () => void } | undefined;
-    initializeDatabase().then(async () => { await refresh(); const notificationReady = await configureNotifications(); if (notificationReady) notificationSubscription = (await listenForNotificationActions(refresh)) ?? undefined; }).catch((error) => Alert.alert('Could not initialize HabbitDot', String(error))).finally(() => setLoading(false));
+    initializeDatabase().then(async () => {
+      await refresh();
+      const notificationReady = await configureNotifications();
+      if (notificationReady) {
+        notificationSubscription = (await listenForNotificationActions(refresh)) ?? undefined;
+        if (await getSetting('notification_delivery_check') !== '2') {
+          await scheduleDeliveryVerification();
+          await setSetting('notification_delivery_check', '2');
+        }
+      }
+    }).catch((error) => Alert.alert('Could not initialize HabbitDot', String(error))).finally(() => setLoading(false));
     return () => notificationSubscription?.remove();
   }, [refresh]);
 
