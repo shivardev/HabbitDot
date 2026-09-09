@@ -86,7 +86,7 @@ const followupId = (reminderId: number, index: number) => `habit-reminder-${remi
  * suppressed against this rather than being unscheduled: the alarm must keep existing
  * for tomorrow even on days the app is never opened.
  */
-const isSatisfied = (reminder: Pick<EnabledReminder, 'todayCount' | 'dailyGoal'>) => reminder.todayCount >= reminder.dailyGoal;
+const isSatisfied = (reminder: Pick<EnabledReminder, 'todayCount' | 'dailyGoal' | 'habitType'>) => reminder.todayCount >= (reminder.habitType === 'unlimited' ? 1 : reminder.dailyGoal);
 
 async function alreadyLogged(habitId: number) {
   const reminders = await getEnabledReminders(localDateKey());
@@ -167,7 +167,9 @@ function planNotifications(reminders: EnabledReminder[]): PlannedNotification[] 
 function contentFor(plan: PlannedNotification) {
   const { reminder } = plan;
   const due = occurrenceAt(reminder.hour, reminder.minute).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  const progress = reminder.dailyGoal > 1 ? ` · ${reminder.todayCount} of ${reminder.dailyGoal} today` : '';
+  const progress = reminder.habitType === 'unlimited'
+    ? reminder.todayCount > 0 ? ` · ${reminder.todayCount} logged today` : ''
+    : reminder.dailyGoal > 1 ? ` · ${reminder.todayCount} of ${reminder.dailyGoal} today` : '';
   const title = reminder.label?.trim() || reminder.name;
   const body = plan.deliveryKind === 'followup'
     ? `Still not logged — due at ${due}.${progress}`

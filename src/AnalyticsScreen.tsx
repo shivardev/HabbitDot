@@ -26,8 +26,9 @@ function buildDays(habits: Habit[], rangeDays: RangeDays): DayMetric[] {
     let possible = 0;
     for (const habit of habits) {
       if (startOfDay(new Date(habit.createdAt)) > date) continue;
-      possible += habit.dailyGoal;
-      completed += Math.min(habit.completionCounts[key] ?? 0, habit.dailyGoal);
+      const target = habit.habitType === 'unlimited' ? 1 : habit.dailyGoal;
+      possible += target;
+      completed += Math.min(habit.completionCounts[key] ?? 0, target);
     }
     return { date, key, completed, possible, rate: possible ? completed / possible : 0 };
   });
@@ -71,9 +72,10 @@ export function AnalyticsScreen({ habits }: { habits: Habit[] }) {
     const habitStats = habits.map((habit) => {
       const created = startOfDay(new Date(habit.createdAt));
       const eligible = days.filter((day) => day.date >= created);
-      const target = eligible.length * habit.dailyGoal;
-      const done = eligible.reduce((sum, day) => sum + Math.min(habit.completionCounts[day.key] ?? 0, habit.dailyGoal), 0);
-      return { habit, done, target, rate: target ? done / target : 0 };
+      const target = eligible.length * (habit.habitType === 'unlimited' ? 1 : habit.dailyGoal);
+      const done = eligible.reduce((sum, day) => sum + Math.min(habit.completionCounts[day.key] ?? 0, habit.habitType === 'unlimited' ? 1 : habit.dailyGoal), 0);
+      const totalLogs = eligible.reduce((sum, day) => sum + (habit.completionCounts[day.key] ?? 0), 0);
+      return { habit, done, target, totalLogs, rate: target ? done / target : 0 };
     }).sort((a, b) => b.rate - a.rate);
     return { days, completed, rate, perfectDays, bestStreak: bestPerfectStreak(days), weekday, trend, habitStats };
   }, [habits, rangeDays]);
@@ -112,9 +114,9 @@ export function AnalyticsScreen({ habits }: { habits: Habit[] }) {
 
     <View style={styles.chartCard}>
       <View style={styles.sectionHeader}><View><Text style={styles.cardLabel}>BREAKDOWN</Text><Text style={styles.sectionTitle}>HABIT PERFORMANCE</Text></View></View>
-      {analytics.habitStats.map(({ habit, done, target, rate }) => <View key={habit.id} style={styles.habitRow}>
+      {analytics.habitStats.map(({ habit, done, target, totalLogs, rate }) => <View key={habit.id} style={styles.habitRow}>
         <View style={[styles.habitMark, { backgroundColor: `${habit.color}28` }]}><View style={[styles.habitMarkInner, { borderColor: habit.color }]} /></View>
-        <View style={styles.habitStats}><View style={styles.habitTitleRow}><Text numberOfLines={1} style={styles.habitName}>{habit.name.toUpperCase()}</Text><Text style={[styles.habitRate, { color: habit.color }]}>{Math.round(rate * 100)}%</Text></View><AnalyticsBar value={rate} color={habit.color} /><Text style={styles.habitMeta}>{done} OF {target} TARGET CHECK-INS</Text></View>
+        <View style={styles.habitStats}><View style={styles.habitTitleRow}><Text numberOfLines={1} style={styles.habitName}>{habit.name.toUpperCase()}</Text><Text style={[styles.habitRate, { color: habit.color }]}>{Math.round(rate * 100)}%</Text></View><AnalyticsBar value={rate} color={habit.color} /><Text style={styles.habitMeta}>{habit.habitType === 'unlimited' ? `${totalLogs} LOGS · ${done} ACTIVE DAYS` : `${done} OF ${target} TARGET CHECK-INS`}</Text></View>
       </View>)}
       {habits.length === 0 && <Text style={styles.emptyText}>ADD A HABIT TO START BUILDING INSIGHTS.</Text>}
     </View>

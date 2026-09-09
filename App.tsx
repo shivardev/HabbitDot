@@ -6,7 +6,7 @@ import * as Sharing from 'expo-sharing';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, FlatList, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { addDiagnosticLog, addHabit, createBackup, getHabits, getSetting, Habit, initializeDatabase, parseBackup, REMINDER_DEFAULTS, replaceHabitReminders, restoreBackup, setSetting, toggleEntry, updateDailyGoal, updateHabit, updatePrimaryReminder } from './src/database';
+import { addDiagnosticLog, addHabit, createBackup, decrementEntry, getHabits, getSetting, Habit, HabitType, initializeDatabase, parseBackup, REMINDER_DEFAULTS, replaceHabitReminders, restoreBackup, setSetting, toggleEntry, updateDailyGoal, updateHabit, updatePrimaryReminder } from './src/database';
 import { configureNotifications, dismissRemindersFor, getLastOpenedHabitId, getMissedToday, listenForNotificationActions, NotificationHealth, notifyMissedReminders, scheduleDeliveryVerification } from './src/notifications';
 import { MissedTodayBanner, ReminderHealthBanner } from './src/ReminderBanners';
 import { openBatteryOptimizationSettings, openExactAlarmSettings, openNotificationSettings } from './modules/habbitdot-reliability';
@@ -23,8 +23,12 @@ function dateKey(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function progressColor(color: string, count: number, goal: number) {
+function progressColor(color: string, count: number, goal: number, unlimited = false) {
   if (count <= 0) return `${color}30`;
+  if (unlimited) {
+    const alpha = Math.round(0x30 + (0xff - 0x30) * (1 - Math.exp(-count / 3)));
+    return `${color}${alpha.toString(16).padStart(2, '0').toUpperCase()}`;
+  }
   if (count >= Math.max(1, goal)) return color;
   const ratio = count / Math.max(1, goal);
   const alpha = Math.round(0x30 + ratio * (0xff - 0x30));
@@ -45,12 +49,13 @@ function historyWeeks(count = 26) {
   );
 }
 
-function HabitCard({ habit, onToggle, onOpen }: { habit: Habit; onToggle: (habitId: number, date: string) => void; onOpen: (habit: Habit) => void }) {
+function HabitCard({ habit, onDecrement, onToggle, onOpen }: { habit: Habit; onDecrement: (habitId: number, date: string) => void; onToggle: (habitId: number, date: string) => void; onOpen: (habit: Habit) => void }) {
   const weeks = useMemo(() => historyWeeks(), []);
+  const suppressPress = useRef(false);
   const today = dateKey(new Date());
   const todayComplete = habit.completedDates.includes(today);
   const todayCount = habit.completionCounts[today] ?? 0;
-  const todayRatio = todayCount / Math.max(1, habit.dailyGoal);
+  const todayRatio = habit.habitType === 'unlimited' ? 1 - Math.exp(-todayCount / 3) : todayCount / Math.max(1, habit.dailyGoal);
   const completed = new Set(habit.completedDates);
   const total = habit.completedDates.length;
 
@@ -62,16 +67,16 @@ function HabitCard({ habit, onToggle, onOpen }: { habit: Habit; onToggle: (habit
         </View>
         <View style={styles.habitIdentity}>
           <Text numberOfLines={1} style={styles.habitName}>{habit.name.toUpperCase()}</Text>
-          <Text style={styles.habitMeta}>DAILY · LOCAL</Text>
+          <Text style={styles.habitMeta}>{habit.habitType === 'unlimited' ? 'UNLIMITED · LOCAL' : 'DAILY · LOCAL'}</Text>
         </View>
-        <Pressable accessibilityLabel={`${todayComplete ? 'Uncheck' : 'Complete'} ${habit.name} today`} accessibilityRole="button" onPress={() => onToggle(habit.id, today)} style={({ pressed }) => [styles.todayButton, { backgroundColor: progressColor(habit.color, todayCount, habit.dailyGoal), borderColor: `${habit.color}70` }, pressed && styles.pressed]}>
-          <Text style={[styles.todayCheck, { color: todayRatio >= 0.65 ? '#101012' : habit.color }, todayComplete && styles.todayCheckActive]}>{habit.dailyGoal > 1 ? `${todayCount}/${habit.dailyGoal}` : todayComplete ? '✓' : '+'}</Text>
+        <Pressable accessibilityHint={habit.habitType === 'unlimited' ? 'Long press to undo one log' : undefined} accessibilityLabel={habit.habitType === 'unlimited' ? `Log ${habit.name}; ${todayCount} today` : `${todayComplete ? 'Uncheck' : 'Complete'} ${habit.name} today`} accessibilityRole="button" onLongPress={habit.habitType === 'unlimited' && todayCount > 0 ? () => { suppressPress.current = true; onDecrement(habit.id, today); } : undefined} onPress={() => { if (suppressPress.current) { suppressPress.current = false; return; } onToggle(habit.id, today); }} style={({ pressed }) => [styles.todayButton, { backgroundColor: progressColor(habit.color, todayCount, habit.dailyGoal, habit.habitType === 'unlimited'), borderColor: `${habit.color}70` }, pressed && styles.pressed]}>
+          <Text style={[styles.todayCheck, { color: todayRatio >= 0.65 ? '#101012' : habit.color }, todayComplete && styles.todayCheckActive]}>{habit.habitType === 'unlimited' ? `${todayCount}/∞` : habit.dailyGoal > 1 ? `${todayCount}/${habit.dailyGoal}` : todayComplete ? '✓' : '+'}</Text>
         </Pressable>
       </View>
 
       <View style={[styles.statsStrip, { backgroundColor: `${habit.color}26` }]}>
         <Text style={styles.statText}>● {habit.currentStreak} DAY STREAK</Text>
-        <Text style={styles.statText}>{total} DAYS  ·  GOAL {habit.dailyGoal}×</Text>
+        <Text style={styles.statText}>{total} DAYS  ·  {habit.habitType === 'unlimited' ? 'NO LIMIT' : `GOAL ${habit.dailyGoal}×`}</Text>
       </View>
 
       <View style={styles.historyRow}>
@@ -82,7 +87,7 @@ function HabitCard({ habit, onToggle, onOpen }: { habit: Habit; onToggle: (habit
               {week.map((day) => {
                 const count = habit.completionCounts[day.key] ?? 0;
                 const done = completed.has(day.key);
-                return <Pressable key={day.key} accessibilityLabel={`Open ${habit.name} history at ${day.key}, ${count} of ${habit.dailyGoal}`} disabled={day.future} onPress={() => onOpen(habit)} style={({ pressed }) => [styles.historyDot, { backgroundColor: progressColor(habit.color, count, habit.dailyGoal) }, day.future && styles.futureDot, pressed && styles.pressed]} />;
+                return <Pressable key={day.key} accessibilityLabel={`Open ${habit.name} history at ${day.key}, ${count}${habit.habitType === 'unlimited' ? ' logs' : ` of ${habit.dailyGoal}`}`} disabled={day.future} onPress={() => onOpen(habit)} style={({ pressed }) => [styles.historyDot, { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited') }, day.future && styles.futureDot, pressed && styles.pressed]} />;
               })}
             </View>
           ))}
@@ -105,8 +110,9 @@ function calendarDays(month: Date) {
   });
 }
 
-function HabitDetail({ habit, month, onChangeMonth, onClose, onEdit, onGoal, onReminder, onToggle }: { habit: Habit; month: Date; onChangeMonth: (offset: number) => void; onClose: () => void; onEdit: () => void; onGoal: (goal: number) => void; onReminder: (hour: number, minute: number, enabled: boolean) => void; onToggle: (habitId: number, date: string) => void }) {
+function HabitDetail({ habit, month, onChangeMonth, onClose, onDecrement, onEdit, onGoal, onReminder, onToggle }: { habit: Habit; month: Date; onChangeMonth: (offset: number) => void; onClose: () => void; onDecrement: (habitId: number, date: string) => void; onEdit: () => void; onGoal: (goal: number) => void; onReminder: (hour: number, minute: number, enabled: boolean) => void; onToggle: (habitId: number, date: string) => void }) {
   const weeks = useMemo(() => historyWeeks(), []);
+  const suppressPress = useRef(false);
   const days = useMemo(() => calendarDays(month), [month]);
   const completed = new Set(habit.completedDates);
   const reminderMinutes = (habit.reminderHour ?? 20) * 60 + (habit.reminderMinute ?? 0);
@@ -125,12 +131,12 @@ function HabitDetail({ habit, month, onChangeMonth, onClose, onEdit, onGoal, onR
 
           <View style={[styles.statsStrip, { backgroundColor: `${habit.color}26` }]}><Text style={styles.statText}>● {habit.currentStreak} DAY STREAK</Text><Text style={styles.statText}>{habit.completedDates.length} CHECK-INS</Text></View>
           <View style={styles.reminderSettings}>
-            <View style={styles.settingLine}><View><Text style={styles.settingTitle}>DAILY TARGET</Text><Text style={styles.settingHint}>Incremental check-ins</Text></View><View style={styles.stepper}><Pressable onPress={() => onGoal(habit.dailyGoal - 1)} style={styles.stepButton}><Text style={styles.stepText}>−</Text></Pressable><Text style={styles.stepValue}>{habit.dailyGoal}×</Text><Pressable onPress={() => onGoal(habit.dailyGoal + 1)} style={styles.stepButton}><Text style={styles.stepText}>+</Text></Pressable></View></View>
+            <View style={styles.settingLine}><View><Text style={styles.settingTitle}>{habit.habitType === 'unlimited' ? 'UNLIMITED LOGGING' : 'DAILY TARGET'}</Text><Text style={styles.settingHint}>{habit.habitType === 'unlimited' ? 'Every log brightens the day' : 'Incremental check-ins'}</Text></View>{habit.habitType === 'unlimited' ? <Text style={styles.stepValue}>∞</Text> : <View style={styles.stepper}><Pressable onPress={() => onGoal(habit.dailyGoal - 1)} style={styles.stepButton}><Text style={styles.stepText}>−</Text></Pressable><Text style={styles.stepValue}>{habit.dailyGoal}×</Text><Pressable onPress={() => onGoal(habit.dailyGoal + 1)} style={styles.stepButton}><Text style={styles.stepText}>+</Text></Pressable></View>}</View>
             <View style={styles.settingDivider} />
             <View style={styles.settingLine}><Pressable onPress={() => onReminder(habit.reminderHour ?? 20, habit.reminderMinute ?? 0, !habit.reminderEnabled)}><Text style={styles.settingTitle}>REMINDER {habit.reminderEnabled ? 'ON' : 'OFF'}</Text><Text style={styles.settingHint}>Tap label to toggle</Text></Pressable><View style={styles.stepper}><Pressable onPress={() => shiftReminder(-15)} style={styles.stepButton}><Text style={styles.stepText}>‹</Text></Pressable><Text style={styles.reminderTime}>{reminderLabel}</Text><Pressable onPress={() => shiftReminder(15)} style={styles.stepButton}><Text style={styles.stepText}>›</Text></Pressable></View></View>
           </View>
           <View style={styles.overviewBox}>
-            <View style={styles.historyRow}><View style={styles.weekdayLabels}>{WEEKDAYS.map((day, index) => <Text key={`${day}-${index}`} style={styles.weekday}>{day}</Text>)}</View><View style={styles.weeks}>{weeks.map((week, weekIndex) => <View key={weekIndex} style={styles.weekColumn}>{week.map((day) => { const count = habit.completionCounts[day.key] ?? 0; return <View key={day.key} style={[styles.historyDot, { backgroundColor: progressColor(habit.color, count, habit.dailyGoal) }, day.future && styles.futureDot]} />; })}</View>)}</View></View>
+            <View style={styles.historyRow}><View style={styles.weekdayLabels}>{WEEKDAYS.map((day, index) => <Text key={`${day}-${index}`} style={styles.weekday}>{day}</Text>)}</View><View style={styles.weeks}>{weeks.map((week, weekIndex) => <View key={weekIndex} style={styles.weekColumn}>{week.map((day) => { const count = habit.completionCounts[day.key] ?? 0; return <View key={day.key} style={[styles.historyDot, { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited') }, day.future && styles.futureDot]} />; })}</View>)}</View></View>
             <View style={styles.monthLabels}><Text style={styles.monthLabel}>MAR</Text><Text style={styles.monthLabel}>APR</Text><Text style={styles.monthLabel}>MAY</Text><Text style={styles.monthLabel}>JUN</Text><Text style={styles.monthLabel}>JUL</Text><Text style={styles.monthLabel}>AUG</Text></View>
           </View>
 
@@ -138,8 +144,8 @@ function HabitDetail({ habit, month, onChangeMonth, onClose, onEdit, onGoal, onR
             <View style={styles.calendarWeek}>{WEEKDAYS.map((day, index) => <Text key={`${day}-${index}`} style={styles.calendarWeekday}>{day}</Text>)}</View>
             <View style={styles.calendarGrid}>{days.map((day) => {
               const count = habit.completionCounts[day.key] ?? 0;
-              const done = count >= habit.dailyGoal;
-              return <Pressable key={day.key} accessibilityLabel={`${habit.name}, ${day.key}, ${count} of ${habit.dailyGoal}`} disabled={!day.inMonth || day.future} onPress={() => onToggle(habit.id, day.key)} style={({ pressed }) => [styles.calendarCell, !day.inMonth && styles.calendarOutside, count > 0 && { backgroundColor: progressColor(habit.color, count, habit.dailyGoal), borderColor: habit.color }, pressed && styles.pressed]}><Text style={[styles.calendarDay, count > 0 && { color: count >= habit.dailyGoal ? '#111114' : '#F4F4F2' }]}>{day.day}</Text><Text style={[styles.calendarState, count > 0 && { color: count >= habit.dailyGoal ? '#111114' : '#F4F4F2' }]}>{count}/{habit.dailyGoal}</Text></Pressable>;
+              const bright = habit.habitType === 'unlimited' ? count >= 3 : count >= habit.dailyGoal;
+              return <Pressable key={day.key} accessibilityHint={habit.habitType === 'unlimited' ? 'Long press to undo one log' : undefined} accessibilityLabel={`${habit.name}, ${day.key}, ${count}${habit.habitType === 'unlimited' ? ' logs' : ` of ${habit.dailyGoal}`}`} disabled={!day.inMonth || day.future} onLongPress={habit.habitType === 'unlimited' && count > 0 ? () => { suppressPress.current = true; onDecrement(habit.id, day.key); } : undefined} onPress={() => { if (suppressPress.current) { suppressPress.current = false; return; } onToggle(habit.id, day.key); }} style={({ pressed }) => [styles.calendarCell, !day.inMonth && styles.calendarOutside, count > 0 && { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited'), borderColor: habit.color }, pressed && styles.pressed]}><Text style={[styles.calendarDay, count > 0 && { color: bright ? '#111114' : '#F4F4F2' }]}>{day.day}</Text><Text style={[styles.calendarState, count > 0 && { color: bright ? '#111114' : '#F4F4F2' }]}>{count}/{habit.habitType === 'unlimited' ? '∞' : habit.dailyGoal}</Text></Pressable>;
             })}</View>
           </View>
           <View style={styles.monthControls}><Pressable accessibilityLabel="Previous month" onPress={() => onChangeMonth(-1)} style={styles.monthArrow}><Text style={styles.monthArrowText}>‹</Text></Pressable><View style={styles.monthName}><Text style={styles.monthNameText}>{month.toLocaleDateString(undefined, { month: 'long' }).toUpperCase()}</Text></View><View style={styles.yearBox}><Text style={styles.monthNameText}>{month.getFullYear()}</Text></View><Pressable accessibilityLabel="Next month" onPress={() => onChangeMonth(1)} style={styles.monthArrow}><Text style={styles.monthArrowText}>›</Text></Pressable></View>
@@ -204,14 +210,15 @@ function ReminderEditor({ color, index, onChange, onDelete, reminder }: { color:
   </View>;
 }
 
-function EditHabit({ habit, onClose, onSave }: { habit: Habit; onClose: () => void; onSave: (name: string, color: string, goal: number, reminders: EditableReminder[]) => Promise<void> }) {
+function EditHabit({ habit, onClose, onSave }: { habit: Habit; onClose: () => void; onSave: (name: string, color: string, goal: number, habitType: HabitType, reminders: EditableReminder[]) => Promise<void> }) {
   const [draftName, setDraftName] = useState(habit.name);
   const [color, setColor] = useState(habit.color);
   const [goal, setGoal] = useState(habit.dailyGoal);
+  const [habitType, setHabitType] = useState<HabitType>(habit.habitType);
   const [saving, setSaving] = useState(false);
   const [reminders, setReminders] = useState<EditableReminder[]>(() => habit.reminders.map((item) => ({ ...item, key: String(item.id) })));
   const updateReminder = (key: string, changes: Partial<EditableReminder>) => setReminders((items) => items.map((item) => item.key === key ? { ...item, ...changes } : item));
-  const save = async () => { if (!draftName.trim() || saving) return; setSaving(true); try { await onSave(draftName.trim(), color, goal, reminders); } finally { setSaving(false); } };
+  const save = async () => { if (!draftName.trim() || saving) return; setSaving(true); try { await onSave(draftName.trim(), color, goal, habitType, reminders); } finally { setSaving(false); } };
   return <Modal animationType="slide" onRequestClose={onClose} visible>
     <SafeAreaView edges={['top', 'bottom']} style={styles.editScreen}>
       <View style={styles.editHeader}><Pressable onPress={onClose} style={styles.closeButton}><Text style={styles.editBack}>‹</Text></Pressable><Text style={styles.editTitle}>EDIT HABIT</Text><Pressable onPress={save} style={[styles.editDone, saving && styles.disabled]}><Text style={styles.editDoneText}>✓</Text></Pressable></View>
@@ -220,8 +227,9 @@ function EditHabit({ habit, onClose, onSave }: { habit: Habit; onClose: () => vo
         <TextInput onChangeText={setDraftName} placeholder="NAME YOUR HABIT" placeholderTextColor="#67676D" style={styles.editInput} value={draftName} />
         <Text style={styles.editLabel}>COLOR</Text>
         <View style={styles.colorGrid}>{COLORS.map((option) => <Pressable accessibilityLabel={`Use color ${option}`} key={option} onPress={() => setColor(option)} style={[styles.colorChoice, { backgroundColor: option }, color === option && styles.colorSelected]}>{color === option && <Text style={styles.colorCheck}>✓</Text>}</Pressable>)}</View>
-        <Text style={styles.editLabel}>HOW MANY TIMES PER DAY?</Text>
-        <View style={styles.goalEditor}><View><Text style={styles.goalNumber}>{goal}×</Text><Text style={styles.settingHint}>Each notification action increments progress</Text></View><View style={styles.stepper}><Pressable onPress={() => setGoal(Math.max(1, goal - 1))} style={styles.largeStep}><Text style={styles.stepText}>−</Text></Pressable><Pressable onPress={() => setGoal(Math.min(20, goal + 1))} style={styles.largeStep}><Text style={styles.stepText}>+</Text></Pressable></View></View>
+        <Text style={styles.editLabel}>TRACKING TYPE</Text>
+        <View style={styles.typePicker}><Pressable accessibilityLabel="Use a daily target" onPress={() => setHabitType('target')} style={[styles.typeChoice, habitType === 'target' && styles.typeChoiceActive]}><Text style={[styles.typeChoiceTitle, habitType === 'target' && styles.typeChoiceTextActive]}>DAILY TARGET</Text><Text style={styles.settingHint}>Finish at a set count</Text></Pressable><Pressable accessibilityLabel="Use unlimited logging" onPress={() => setHabitType('unlimited')} style={[styles.typeChoice, habitType === 'unlimited' && styles.typeChoiceActive]}><Text style={[styles.typeChoiceTitle, habitType === 'unlimited' && styles.typeChoiceTextActive]}>UNLIMITED ∞</Text><Text style={styles.settingHint}>Every log adds intensity</Text></Pressable></View>
+        {habitType === 'target' && <><Text style={styles.editLabel}>HOW MANY TIMES PER DAY?</Text><View style={styles.goalEditor}><View><Text style={styles.goalNumber}>{goal}×</Text><Text style={styles.settingHint}>Each notification action increments progress</Text></View><View style={styles.stepper}><Pressable onPress={() => setGoal(Math.max(1, goal - 1))} style={styles.largeStep}><Text style={styles.stepText}>−</Text></Pressable><Pressable onPress={() => setGoal(Math.min(20, goal + 1))} style={styles.largeStep}><Text style={styles.stepText}>+</Text></Pressable></View></View></>}
         <View style={styles.reminderHeading}><View><Text style={styles.editLabelNoMargin}>REMINDERS</Text><Text style={styles.settingHint}>Choose every time you want to be notified</Text></View><Pressable accessibilityLabel="Add reminder" onPress={() => setReminders((items) => [...items, newReminder()])} style={styles.addReminder}><Text style={styles.addReminderText}>+</Text></Pressable></View>
         {reminders.length === 0 && <View style={styles.noReminders}><Text style={styles.noRemindersTitle}>NO REMINDERS</Text><Text style={styles.settingHint}>Tap + to add a notification time.</Text></View>}
         {reminders.map((reminder, index) => <ReminderEditor
@@ -346,10 +354,11 @@ export default function App() {
   }
 
   async function markDay(habitId: number, date: string) { await toggleEntry(habitId, date); await refresh(); if (date === dateKey(new Date())) { await dismissRemindersFor(habitId); scheduleSync(); } }
+  async function undoDay(habitId: number, date: string) { await decrementEntry(habitId, date); await refresh(); if (date === dateKey(new Date())) scheduleSync(); }
   async function changeGoal(habitId: number, goal: number) { await updateDailyGoal(habitId, goal); await refresh(); scheduleSync(); }
   async function changeReminder(habitId: number, hour: number, minute: number, enabled: boolean) { await updatePrimaryReminder(habitId, hour, minute, enabled); await refresh(); scheduleSync(); }
-  async function saveHabitEdits(habitId: number, nextName: string, color: string, goal: number, reminders: EditableReminder[]) {
-    await updateHabit(habitId, nextName, color, goal);
+  async function saveHabitEdits(habitId: number, nextName: string, color: string, goal: number, habitType: HabitType, reminders: EditableReminder[]) {
+    await updateHabit(habitId, nextName, color, goal, habitType);
     await replaceHabitReminders(habitId, reminders.map(({ key, ...reminder }) => reminder));
     await refresh();
     setEditingHabitId(null);
@@ -423,12 +432,12 @@ export default function App() {
           </View>}
 
           {loading ? <ActivityIndicator color="#B7F171" style={styles.loader} /> : (
-            <FlatList contentContainerStyle={styles.list} data={habits} keyExtractor={(item) => String(item.id)} renderItem={({ item }) => <HabitCard habit={item} onOpen={(habit) => { setSelectedHabitId(habit.id); setViewedMonth(new Date(new Date().getFullYear(), new Date().getMonth(), 1)); }} onToggle={markDay} />} showsVerticalScrollIndicator={false}
+            <FlatList contentContainerStyle={styles.list} data={habits} keyExtractor={(item) => String(item.id)} renderItem={({ item }) => <HabitCard habit={item} onDecrement={undoDay} onOpen={(habit) => { setSelectedHabitId(habit.id); setViewedMonth(new Date(new Date().getFullYear(), new Date().getMonth(), 1)); }} onToggle={markDay} />} showsVerticalScrollIndicator={false}
               ListEmptyComponent={<View style={styles.empty}><View style={styles.emptyOrbit}><View style={styles.emptyCenter} /></View><Text style={styles.emptyTitle}>YOUR GRID IS READY</Text><Text style={styles.emptyBody}>Tap + to add a habit. Each day becomes a dot in your story.</Text></View>} />
           )}
 
-          {selectedHabitId !== null && habits.find((habit) => habit.id === selectedHabitId) && <HabitDetail habit={habits.find((habit) => habit.id === selectedHabitId)!} month={viewedMonth} onChangeMonth={(offset) => setViewedMonth((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1))} onClose={() => setSelectedHabitId(null)} onEdit={() => { setEditingHabitId(selectedHabitId); setSelectedHabitId(null); }} onGoal={(goal) => changeGoal(selectedHabitId, goal)} onReminder={(hour, minute, enabled) => changeReminder(selectedHabitId, hour, minute, enabled)} onToggle={markDay} />}
-          {editingHabitId !== null && habits.find((habit) => habit.id === editingHabitId) && <EditHabit habit={habits.find((habit) => habit.id === editingHabitId)!} onClose={() => setEditingHabitId(null)} onSave={(nextName, color, goal, reminders) => saveHabitEdits(editingHabitId, nextName, color, goal, reminders)} />}
+          {selectedHabitId !== null && habits.find((habit) => habit.id === selectedHabitId) && <HabitDetail habit={habits.find((habit) => habit.id === selectedHabitId)!} month={viewedMonth} onChangeMonth={(offset) => setViewedMonth((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1))} onClose={() => setSelectedHabitId(null)} onDecrement={undoDay} onEdit={() => { setEditingHabitId(selectedHabitId); setSelectedHabitId(null); }} onGoal={(goal) => changeGoal(selectedHabitId, goal)} onReminder={(hour, minute, enabled) => changeReminder(selectedHabitId, hour, minute, enabled)} onToggle={markDay} />}
+          {editingHabitId !== null && habits.find((habit) => habit.id === editingHabitId) && <EditHabit habit={habits.find((habit) => habit.id === editingHabitId)!} onClose={() => setEditingHabitId(null)} onSave={(nextName, color, goal, habitType, reminders) => saveHabitEdits(editingHabitId, nextName, color, goal, habitType, reminders)} />}
           </> : activeScreen === 'analytics' ? (loading ? <ActivityIndicator color="#B7F171" style={styles.loader} /> : <AnalyticsScreen habits={habits} />) : activeScreen === 'logs' ? <NotificationLogsScreen health={health} onRecheck={() => runSync(false)} /> : (
             <ScrollView contentContainerStyle={styles.backupScreen}>
               <Text style={styles.backupEyebrow}>DATA OWNERSHIP</Text>
@@ -482,4 +491,5 @@ const styles = StyleSheet.create({
   optionRow: { alignItems: 'center', borderTopColor: '#212125', borderTopWidth: 1, flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, paddingVertical: 10 },
   optionIdentity: { flex: 1, paddingRight: 10 },
   editScreen: { backgroundColor: '#0B0B0D', flex: 1 }, editHeader: { alignItems: 'center', borderBottomColor: '#252529', borderBottomWidth: 1, flexDirection: 'row', gap: 12, paddingHorizontal: 14, paddingVertical: 12 }, editBack: { color: '#F4F4F2', fontSize: 29, lineHeight: 31 }, editTitle: { color: '#F4F4F2', flex: 1, fontSize: 20, fontWeight: '900', letterSpacing: 1.2 }, editDone: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 10, height: 40, justifyContent: 'center', width: 44 }, editDoneText: { color: '#101012', fontSize: 20, fontWeight: '900' }, editContent: { padding: 18, paddingBottom: 42 }, editLabel: { color: '#DADAD8', fontSize: 10, fontWeight: '900', letterSpacing: 1, marginBottom: 10, marginTop: 20 }, editLabelNoMargin: { color: '#DADAD8', fontSize: 10, fontWeight: '900', letterSpacing: 1 }, editInput: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, color: '#F4F4F2', fontSize: 15, fontWeight: '800', letterSpacing: 0.5, paddingHorizontal: 14, paddingVertical: 14 }, colorGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, colorChoice: { alignItems: 'center', borderRadius: 10, height: 48, justifyContent: 'center', width: '22.9%' }, colorSelected: { borderColor: '#FFFFFF', borderWidth: 3 }, colorCheck: { color: '#FFFFFF', fontSize: 18, fontWeight: '900' }, goalEditor: { alignItems: 'center', borderColor: '#303036', borderRadius: 11, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', padding: 14 }, goalNumber: { color: '#F4F4F2', fontSize: 22, fontWeight: '900' }, largeStep: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 9, height: 42, justifyContent: 'center', width: 46 }, reminderHeading: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10, marginTop: 24 }, addReminder: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 9, height: 38, justifyContent: 'center', width: 42 }, addReminderText: { color: '#101012', fontSize: 24 }, noReminders: { borderColor: '#303036', borderRadius: 11, borderStyle: 'dashed', borderWidth: 1, padding: 18 }, noRemindersTitle: { color: '#85858C', fontSize: 10, fontWeight: '900' }, reminderRow: { alignItems: 'center', flexDirection: 'row', gap: 7, padding: 10 }, reminderToggle: { backgroundColor: '#34343A', borderRadius: 11, height: 22, padding: 3, width: 38 }, toggleKnob: { backgroundColor: '#F4F4F2', borderRadius: 8, height: 16, width: 16 }, toggleKnobOn: { alignSelf: 'flex-end' }, reminderIdentity: { flex: 1 }, reminderName: { color: '#73737A', fontSize: 6, fontWeight: '900', letterSpacing: 0.8 }, reminderBigTime: { color: '#F4F4F2', fontSize: 13, fontWeight: '900', marginTop: 2 }, timePickerButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 8, flexDirection: 'row', gap: 5, height: 34, justifyContent: 'center', paddingHorizontal: 9 }, timePickerIcon: { color: '#F4F4F2', fontSize: 17 }, timePickerLabel: { color: '#F4F4F2', fontSize: 7, fontWeight: '900', letterSpacing: 0.5 }, muted: { color: '#67676D' }, deleteReminder: { alignItems: 'center', height: 30, justifyContent: 'center', width: 25 }, deleteReminderText: { color: '#FF7780', fontSize: 22 }, saveHabitButton: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 12, marginTop: 24, paddingVertical: 17 }, saveHabitText: { color: '#101012', fontSize: 12, fontWeight: '900', letterSpacing: 1 },
+  typePicker: { flexDirection: 'row', gap: 8 }, typeChoice: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, flex: 1, padding: 13 }, typeChoiceActive: { backgroundColor: '#B7F17118', borderColor: '#B7F171' }, typeChoiceTitle: { color: '#B0B0B5', fontSize: 9, fontWeight: '900', letterSpacing: 0.6 }, typeChoiceTextActive: { color: '#B7F171' },
 });

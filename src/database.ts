@@ -7,12 +7,13 @@ export type DeliveryKind = 'primary' | 'followup' | 'snooze' | 'catchup';
 export type DeliveryState = 'scheduled' | 'delivered' | 'acted' | 'unconfirmed';
 export type ReminderDelivery = { id: number; reminderId: number; habitId: number; habitName: string; occurrenceAt: string; kind: DeliveryKind; identifier: string; state: DeliveryState; deliveredAt: string | null; actedAt: string | null; action: string | null };
 export const REMINDER_DEFAULTS = { snoozeMinutes: 10, followupMinutes: 15, followupCount: 2 };
-export type Habit = { id: number; name: string; color: string; createdAt: string; dailyGoal: number; reminderHour: number | null; reminderMinute: number | null; reminderEnabled: boolean; reminders: ReminderTime[]; completedDates: string[]; completionCounts: Record<string, number>; currentStreak: number };
+export type HabitType = 'target' | 'unlimited';
+export type Habit = { id: number; name: string; color: string; createdAt: string; dailyGoal: number; habitType: HabitType; reminderHour: number | null; reminderMinute: number | null; reminderEnabled: boolean; reminders: ReminderTime[]; completedDates: string[]; completionCounts: Record<string, number>; currentStreak: number };
 export type HabbitDotBackup = {
   format: 'habbitdot-backup';
   version: 1;
   exportedAt: string;
-  habits: Array<{ id: number; name: string; color: string; createdAt: string; archivedAt: string | null; dailyGoal: number }>;
+  habits: Array<{ id: number; name: string; color: string; createdAt: string; archivedAt: string | null; dailyGoal: number; habitType?: HabitType }>;
   entries: Array<{ habitId: number; entryDate: string; completedAt: string; completionCount: number }>;
   // The delivery fields are optional so backups written before they existed still restore.
   reminders: Array<{ id: number; habitId: number; hour: number; minute: number; enabled: boolean; label?: string | null; body?: string | null; snoozeMinutes?: number; followupMinutes?: number; followupCount?: number }>;
@@ -36,6 +37,9 @@ export async function initializeDatabase() {
     INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, datetime('now'));
   `);
   try { await db.execAsync('ALTER TABLE habits ADD COLUMN daily_goal INTEGER NOT NULL DEFAULT 1'); } catch {}
+  try { await db.execAsync("ALTER TABLE habits ADD COLUMN habit_type TEXT NOT NULL DEFAULT 'target'"); } catch {}
+  const unlimitedMigration = await db.runAsync("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, datetime('now'))");
+  if (unlimitedMigration.changes > 0) await db.runAsync("UPDATE habits SET habit_type = 'unlimited' WHERE lower(trim(name)) = 'minoxidil'");
   try { await db.execAsync('ALTER TABLE habit_entries ADD COLUMN completion_count INTEGER NOT NULL DEFAULT 1'); } catch {}
   // Per-reminder delivery behaviour. Added in place so existing habits and history survive the upgrade.
   try { await db.execAsync('ALTER TABLE habit_reminders ADD COLUMN label TEXT'); } catch {}
@@ -64,7 +68,7 @@ export async function initializeDatabase() {
   `);
 }
 
-type HabitRow = { id: number; name: string; color: string; createdAt: string; dailyGoal: number; reminderHour: number | null; reminderMinute: number | null; reminderEnabled: number };
+type HabitRow = { id: number; name: string; color: string; createdAt: string; dailyGoal: number; habitType: HabitType; reminderHour: number | null; reminderMinute: number | null; reminderEnabled: number };
 type EntryRow = { habitId: number; entryDate: string; completionCount: number };
 type ReminderRow = { id: number; habitId: number; hour: number; minute: number; enabled: number; label: string | null; body: string | null; snoozeMinutes: number; followupMinutes: number; followupCount: number };
 function streakFor(dates: string[]) {
@@ -75,7 +79,7 @@ function streakFor(dates: string[]) {
 
 export async function getHabits(): Promise<Habit[]> {
   const db = await getDatabase();
-  const habits = await db.getAllAsync<HabitRow>(`SELECT h.id, h.name, h.color, h.created_at AS createdAt, h.daily_goal AS dailyGoal,
+  const habits = await db.getAllAsync<HabitRow>(`SELECT h.id, h.name, h.color, h.created_at AS createdAt, h.daily_goal AS dailyGoal, h.habit_type AS habitType,
     (SELECT hour FROM habit_reminders WHERE habit_id = h.id ORDER BY id LIMIT 1) AS reminderHour,
     (SELECT minute FROM habit_reminders WHERE habit_id = h.id ORDER BY id LIMIT 1) AS reminderMinute,
     COALESCE((SELECT enabled FROM habit_reminders WHERE habit_id = h.id ORDER BY id LIMIT 1), 0) AS reminderEnabled
@@ -84,7 +88,7 @@ export async function getHabits(): Promise<Habit[]> {
   const reminders = await db.getAllAsync<ReminderRow>(`SELECT id, habit_id AS habitId, hour, minute, enabled, label, body,
     snooze_minutes AS snoozeMinutes, followup_minutes AS followupMinutes, followup_count AS followupCount
     FROM habit_reminders ORDER BY hour, minute, id`);
-  return habits.map((habit) => { const ownEntries = entries.filter((entry) => entry.habitId === habit.id); const ownReminders = reminders.filter((reminder) => reminder.habitId === habit.id).map(({ id, hour, minute, enabled, label, body, snoozeMinutes, followupMinutes, followupCount }) => ({ id, hour, minute, enabled: Boolean(enabled), label, body, snoozeMinutes, followupMinutes, followupCount })); const completionCounts = Object.fromEntries(ownEntries.map((entry) => [entry.entryDate, entry.completionCount])); const completedDates = ownEntries.filter((entry) => entry.completionCount >= habit.dailyGoal).map((entry) => entry.entryDate); return { ...habit, reminderEnabled: Boolean(habit.reminderEnabled), reminders: ownReminders, completionCounts, completedDates, currentStreak: streakFor(completedDates) }; });
+  return habits.map((habit) => { const ownEntries = entries.filter((entry) => entry.habitId === habit.id); const ownReminders = reminders.filter((reminder) => reminder.habitId === habit.id).map(({ id, hour, minute, enabled, label, body, snoozeMinutes, followupMinutes, followupCount }) => ({ id, hour, minute, enabled: Boolean(enabled), label, body, snoozeMinutes, followupMinutes, followupCount })); const completionCounts = Object.fromEntries(ownEntries.map((entry) => [entry.entryDate, entry.completionCount])); const completedDates = ownEntries.filter((entry) => habit.habitType === 'unlimited' ? entry.completionCount > 0 : entry.completionCount >= habit.dailyGoal).map((entry) => entry.entryDate); return { ...habit, reminderEnabled: Boolean(habit.reminderEnabled), reminders: ownReminders, completionCounts, completedDates, currentStreak: streakFor(completedDates) }; });
 }
 
 export async function addHabit(name: string, color: string) {
@@ -95,8 +99,9 @@ export async function addHabit(name: string, color: string) {
 export async function toggleEntry(habitId: number, entryDate: string) {
   const db = await getDatabase();
   const existing = await db.getFirstAsync<{ completionCount: number }>('SELECT completion_count AS completionCount FROM habit_entries WHERE habit_id = ? AND entry_date = ?', habitId, entryDate);
-  const habit = await db.getFirstAsync<{ dailyGoal: number }>('SELECT daily_goal AS dailyGoal FROM habits WHERE id = ?', habitId);
-  if (existing && existing.completionCount >= (habit?.dailyGoal ?? 1)) await db.runAsync('DELETE FROM habit_entries WHERE habit_id = ? AND entry_date = ?', habitId, entryDate);
+  const habit = await db.getFirstAsync<{ dailyGoal: number; habitType: HabitType }>('SELECT daily_goal AS dailyGoal, habit_type AS habitType FROM habits WHERE id = ?', habitId);
+  if (habit?.habitType === 'unlimited' && existing) await db.runAsync('UPDATE habit_entries SET completion_count = completion_count + 1, completed_at = ? WHERE habit_id = ? AND entry_date = ?', new Date().toISOString(), habitId, entryDate);
+  else if (existing && existing.completionCount >= (habit?.dailyGoal ?? 1)) await db.runAsync('DELETE FROM habit_entries WHERE habit_id = ? AND entry_date = ?', habitId, entryDate);
   else if (existing) await db.runAsync('UPDATE habit_entries SET completion_count = completion_count + 1, completed_at = ? WHERE habit_id = ? AND entry_date = ?', new Date().toISOString(), habitId, entryDate);
   else await db.runAsync('INSERT INTO habit_entries(habit_id, entry_date, completed_at, completion_count) VALUES (?, ?, ?, 1)', habitId, entryDate, new Date().toISOString());
 }
@@ -104,13 +109,21 @@ export async function toggleEntry(habitId: number, entryDate: string) {
 export async function incrementEntry(habitId: number, entryDate: string) {
   const db = await getDatabase();
   await db.runAsync(`INSERT INTO habit_entries(habit_id, entry_date, completed_at, completion_count) VALUES (?, ?, ?, 1)
-    ON CONFLICT(habit_id, entry_date) DO UPDATE SET completion_count = MIN(completion_count + 1, (SELECT daily_goal FROM habits WHERE id = ?)), completed_at = excluded.completed_at`, habitId, entryDate, new Date().toISOString(), habitId);
+    ON CONFLICT(habit_id, entry_date) DO UPDATE SET completion_count = CASE WHEN (SELECT habit_type FROM habits WHERE id = ?) = 'unlimited' THEN completion_count + 1 ELSE MIN(completion_count + 1, (SELECT daily_goal FROM habits WHERE id = ?)) END, completed_at = excluded.completed_at`, habitId, entryDate, new Date().toISOString(), habitId, habitId);
+}
+
+export async function decrementEntry(habitId: number, entryDate: string) {
+  const db = await getDatabase();
+  const existing = await db.getFirstAsync<{ completionCount: number }>('SELECT completion_count AS completionCount FROM habit_entries WHERE habit_id = ? AND entry_date = ?', habitId, entryDate);
+  if (!existing) return;
+  if (existing.completionCount <= 1) await db.runAsync('DELETE FROM habit_entries WHERE habit_id = ? AND entry_date = ?', habitId, entryDate);
+  else await db.runAsync('UPDATE habit_entries SET completion_count = completion_count - 1, completed_at = ? WHERE habit_id = ? AND entry_date = ?', new Date().toISOString(), habitId, entryDate);
 }
 
 export async function getSetting(key: string) { const db = await getDatabase(); return (await db.getFirstAsync<{ value: string }>('SELECT value FROM app_settings WHERE key = ?', key))?.value ?? null; }
 export async function setSetting(key: string, value: string) { const db = await getDatabase(); await db.runAsync('INSERT INTO app_settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, value); }
 export async function updateDailyGoal(habitId: number, dailyGoal: number) { const db = await getDatabase(); await db.runAsync('UPDATE habits SET daily_goal = ? WHERE id = ?', Math.max(1, Math.min(20, dailyGoal)), habitId); }
-export async function updateHabit(habitId: number, name: string, color: string, dailyGoal: number) { const db = await getDatabase(); await db.runAsync('UPDATE habits SET name = ?, color = ?, daily_goal = ? WHERE id = ?', name.trim(), color, Math.max(1, Math.min(20, dailyGoal)), habitId); }
+export async function updateHabit(habitId: number, name: string, color: string, dailyGoal: number, habitType: HabitType) { const db = await getDatabase(); await db.runAsync('UPDATE habits SET name = ?, color = ?, daily_goal = ?, habit_type = ? WHERE id = ?', name.trim(), color, Math.max(1, Math.min(20, dailyGoal)), habitType, habitId); }
 export type EditableReminderInput = { hour: number; minute: number; enabled: boolean; label?: string | null; body?: string | null; snoozeMinutes?: number; followupMinutes?: number; followupCount?: number };
 const clampInt = (value: number | undefined, min: number, max: number, fallback: number) => Number.isFinite(value) ? Math.max(min, Math.min(max, Math.round(value as number))) : fallback;
 const trimOrNull = (value: string | null | undefined) => { const text = (value ?? '').trim(); return text ? text.slice(0, 120) : null; };
@@ -135,8 +148,8 @@ export async function replaceHabitReminders(habitId: number, reminders: Editable
   });
 }
 export async function updatePrimaryReminder(habitId: number, hour: number, minute: number, enabled: boolean) { const db = await getDatabase(); const existing = await db.getFirstAsync<{ id: number }>('SELECT id FROM habit_reminders WHERE habit_id = ? ORDER BY id LIMIT 1', habitId); if (existing) await db.runAsync('UPDATE habit_reminders SET hour = ?, minute = ?, enabled = ? WHERE id = ?', hour, minute, enabled ? 1 : 0, existing.id); else await db.runAsync('INSERT INTO habit_reminders(habit_id, hour, minute, enabled) VALUES (?, ?, ?, ?)', habitId, hour, minute, enabled ? 1 : 0); }
-export type EnabledReminder = { id: number; habitId: number; name: string; hour: number; minute: number; dailyGoal: number; todayCount: number; label: string | null; body: string | null; snoozeMinutes: number; followupMinutes: number; followupCount: number };
-export async function getEnabledReminders(entryDate: string) { const db = await getDatabase(); return db.getAllAsync<EnabledReminder>(`SELECT r.id, r.habit_id AS habitId, h.name, r.hour, r.minute, h.daily_goal AS dailyGoal,
+export type EnabledReminder = { id: number; habitId: number; name: string; hour: number; minute: number; dailyGoal: number; habitType: HabitType; todayCount: number; label: string | null; body: string | null; snoozeMinutes: number; followupMinutes: number; followupCount: number };
+export async function getEnabledReminders(entryDate: string) { const db = await getDatabase(); return db.getAllAsync<EnabledReminder>(`SELECT r.id, r.habit_id AS habitId, h.name, r.hour, r.minute, h.daily_goal AS dailyGoal, h.habit_type AS habitType,
   r.label, r.body, r.snooze_minutes AS snoozeMinutes, r.followup_minutes AS followupMinutes, r.followup_count AS followupCount,
   COALESCE((SELECT completion_count FROM habit_entries e WHERE e.habit_id = h.id AND e.entry_date = ?), 0) AS todayCount
   FROM habit_reminders r JOIN habits h ON h.id = r.habit_id WHERE r.enabled = 1 AND h.archived_at IS NULL ORDER BY r.hour, r.minute, r.id`, entryDate); }
@@ -215,7 +228,7 @@ export async function getRecentDeliveries(limit = 60) {
     FROM reminder_deliveries d LEFT JOIN habits h ON h.id = d.habit_id ORDER BY d.occurrence_at DESC LIMIT ?`, limit);
 }
 
-/** Reminders whose time passed today while the habit is still short of its daily goal. */
+/** Reminders whose time passed today while the habit is still short of its target (or unlogged for unlimited habits). */
 export async function getOverdueReminders(entryDate: string, nowMinutes: number) {
   const db = await getDatabase();
   return db.getAllAsync<{ id: number; habitId: number; name: string; hour: number; minute: number; dailyGoal: number; todayCount: number }>(
@@ -223,7 +236,7 @@ export async function getOverdueReminders(entryDate: string, nowMinutes: number)
       COALESCE((SELECT completion_count FROM habit_entries e WHERE e.habit_id = h.id AND e.entry_date = ?), 0) AS todayCount
       FROM habit_reminders r JOIN habits h ON h.id = r.habit_id
       WHERE r.enabled = 1 AND h.archived_at IS NULL AND (r.hour * 60 + r.minute) <= ?
-      AND COALESCE((SELECT completion_count FROM habit_entries e WHERE e.habit_id = h.id AND e.entry_date = ?), 0) < h.daily_goal
+      AND COALESCE((SELECT completion_count FROM habit_entries e WHERE e.habit_id = h.id AND e.entry_date = ?), 0) < CASE WHEN h.habit_type = 'unlimited' THEN 1 ELSE h.daily_goal END
       ORDER BY r.hour, r.minute`, entryDate, nowMinutes, entryDate);
 }
 
@@ -244,7 +257,7 @@ export async function clearDiagnosticLogs() { const db = await getDatabase(); aw
 
 export async function createBackup(): Promise<HabbitDotBackup> {
   const db = await getDatabase();
-  const habits = await db.getAllAsync<{ id: number; name: string; color: string; createdAt: string; archivedAt: string | null; dailyGoal: number }>('SELECT id, name, color, created_at AS createdAt, archived_at AS archivedAt, daily_goal AS dailyGoal FROM habits ORDER BY id');
+  const habits = await db.getAllAsync<{ id: number; name: string; color: string; createdAt: string; archivedAt: string | null; dailyGoal: number; habitType: HabitType }>('SELECT id, name, color, created_at AS createdAt, archived_at AS archivedAt, daily_goal AS dailyGoal, habit_type AS habitType FROM habits ORDER BY id');
   const entries = await db.getAllAsync<{ habitId: number; entryDate: string; completedAt: string; completionCount: number }>('SELECT habit_id AS habitId, entry_date AS entryDate, completed_at AS completedAt, completion_count AS completionCount FROM habit_entries ORDER BY habit_id, entry_date');
   const reminderRows = await db.getAllAsync<{ id: number; habitId: number; hour: number; minute: number; enabled: number; label: string | null; body: string | null; snoozeMinutes: number; followupMinutes: number; followupCount: number }>(`SELECT id, habit_id AS habitId, hour, minute, enabled, label, body,
     snooze_minutes AS snoozeMinutes, followup_minutes AS followupMinutes, followup_count AS followupCount FROM habit_reminders ORDER BY id`);
@@ -266,13 +279,13 @@ export function parseBackup(text: string): HabbitDotBackup {
   const habitIds = new Set<number>();
   for (const habit of backup.habits) {
     if (!isIntegerBetween(habit?.id, 1, 2_147_483_647) || habitIds.has(habit.id)) throw new Error('The backup contains an invalid or duplicate habit ID.');
-    if (typeof habit.name !== 'string' || !habit.name.trim() || habit.name.length > 200 || typeof habit.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(habit.color) || !isIsoDateTime(habit.createdAt) || (habit.archivedAt !== null && !isIsoDateTime(habit.archivedAt)) || !isIntegerBetween(habit.dailyGoal, 1, 20)) throw new Error(`Habit ${habit.id} is invalid.`);
+    if (typeof habit.name !== 'string' || !habit.name.trim() || habit.name.length > 200 || typeof habit.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(habit.color) || !isIsoDateTime(habit.createdAt) || (habit.archivedAt !== null && !isIsoDateTime(habit.archivedAt)) || !isIntegerBetween(habit.dailyGoal, 1, 20) || (habit.habitType != null && habit.habitType !== 'target' && habit.habitType !== 'unlimited')) throw new Error(`Habit ${habit.id} is invalid.`);
     habitIds.add(habit.id);
   }
   const entryKeys = new Set<string>();
   for (const entry of backup.entries) {
     const key = `${entry?.habitId}:${entry?.entryDate}`;
-    if (!habitIds.has(entry?.habitId) || typeof entry.entryDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(entry.entryDate) || Number.isNaN(Date.parse(`${entry.entryDate}T00:00:00`)) || !isIsoDateTime(entry.completedAt) || !isIntegerBetween(entry.completionCount, 1, 20) || entryKeys.has(key)) throw new Error('The backup contains an invalid or duplicate check-in.');
+    if (!habitIds.has(entry?.habitId) || typeof entry.entryDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(entry.entryDate) || Number.isNaN(Date.parse(`${entry.entryDate}T00:00:00`)) || !isIsoDateTime(entry.completedAt) || !isIntegerBetween(entry.completionCount, 1, 1_000_000) || entryKeys.has(key)) throw new Error('The backup contains an invalid or duplicate check-in.');
     entryKeys.add(key);
   }
   const reminderIds = new Set<number>();
@@ -296,7 +309,7 @@ export async function restoreBackup(backup: HabbitDotBackup) {
   const db = await getDatabase();
   await db.withExclusiveTransactionAsync(async (transaction) => {
     await transaction.execAsync('DELETE FROM habit_entries; DELETE FROM habit_reminders; DELETE FROM habits; DELETE FROM app_settings; DELETE FROM reminder_deliveries;');
-    for (const habit of backup.habits) await transaction.runAsync('INSERT INTO habits(id, name, color, created_at, archived_at, daily_goal) VALUES (?, ?, ?, ?, ?, ?)', habit.id, habit.name.trim(), habit.color, habit.createdAt, habit.archivedAt, habit.dailyGoal);
+    for (const habit of backup.habits) await transaction.runAsync('INSERT INTO habits(id, name, color, created_at, archived_at, daily_goal, habit_type) VALUES (?, ?, ?, ?, ?, ?, ?)', habit.id, habit.name.trim(), habit.color, habit.createdAt, habit.archivedAt, habit.dailyGoal, habit.habitType ?? 'target');
     for (const entry of backup.entries) await transaction.runAsync('INSERT INTO habit_entries(habit_id, entry_date, completed_at, completion_count) VALUES (?, ?, ?, ?)', entry.habitId, entry.entryDate, entry.completedAt, entry.completionCount);
     for (const reminder of backup.reminders) await transaction.runAsync('INSERT INTO habit_reminders(id, habit_id, hour, minute, enabled, notification_id, label, body, snooze_minutes, followup_minutes, followup_count) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)',
       reminder.id, reminder.habitId, reminder.hour, reminder.minute, reminder.enabled ? 1 : 0, trimOrNull(reminder.label), trimOrNull(reminder.body),
