@@ -3,7 +3,7 @@
     "name": "HabbitDot",
     "slug": "habbitdot",
     "owner": "blazingbane",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -12,7 +12,7 @@
     },
     "android": {
       "package": "app.habbitdot.mobile",
-      "versionCode": 6,
+      "versionCode": 7,
       "permissions": [
         "POST_NOTIFICATIONS",
         "SCHEDULE_EXACT_ALARM",
