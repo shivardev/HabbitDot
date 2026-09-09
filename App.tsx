@@ -1,11 +1,17 @@
 import { StatusBar } from 'expo-status-bar';
 import { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import { File, Paths } from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, AppState, FlatList, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { addHabit, getHabits, getSetting, Habit, initializeDatabase, replaceHabitReminders, setSetting, toggleEntry, updateDailyGoal, updateHabit, updatePrimaryReminder } from './src/database';
-import { configureNotifications, listenForNotificationActions, scheduleDeliveryVerification } from './src/notifications';
+import { addDiagnosticLog, addHabit, createBackup, getHabits, getSetting, Habit, initializeDatabase, parseBackup, REMINDER_DEFAULTS, replaceHabitReminders, restoreBackup, setSetting, toggleEntry, updateDailyGoal, updateHabit, updatePrimaryReminder } from './src/database';
+import { configureNotifications, dismissRemindersFor, getLastOpenedHabitId, getMissedToday, listenForNotificationActions, NotificationHealth, notifyMissedReminders, scheduleDeliveryVerification } from './src/notifications';
+import { MissedTodayBanner, ReminderHealthBanner } from './src/ReminderBanners';
+import { openBatteryOptimizationSettings, openExactAlarmSettings, openNotificationSettings } from './modules/habbitdot-reliability';
 import { AnalyticsScreen } from './src/AnalyticsScreen';
+import { NotificationLogsScreen } from './src/NotificationLogsScreen';
 
 const COLORS = ['#B7F171', '#B79CFF', '#FFB86B', '#7CE7D5', '#FF91AF', '#FF5D62', '#F3C51D', '#2DB26B', '#4CA9D8', '#2D82B7', '#CE1981', '#8D49B0'];
 const WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
@@ -143,7 +149,8 @@ function HabitDetail({ habit, month, onChangeMonth, onClose, onEdit, onGoal, onR
   </Modal>;
 }
 
-type EditableReminder = { key: string; hour: number; minute: number; enabled: boolean };
+type EditableReminder = { key: string; hour: number; minute: number; enabled: boolean; label: string | null; body: string | null; snoozeMinutes: number; followupMinutes: number; followupCount: number };
+const newReminder = (): EditableReminder => ({ key: `${Date.now()}`, hour: 9, minute: 0, enabled: true, label: null, body: null, ...REMINDER_DEFAULTS });
 const formatTime = (hour: number, minute: number) => new Date(2000, 0, 1, hour, minute).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 
 function openTimePicker(hour: number, minute: number, onSelect: (hour: number, minute: number) => void) {
@@ -158,13 +165,52 @@ function openTimePicker(hour: number, minute: number, onSelect: (hour: number, m
   });
 }
 
+const clampReminderValue = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+function ReminderStepper({ label, hint, value, min, max, step, suffix, onChange }: { label: string; hint: string; value: number; min: number; max: number; step: number; suffix: string; onChange: (value: number) => void }) {
+  return <View style={styles.optionRow}>
+    <View style={styles.optionIdentity}><Text style={styles.optionLabel}>{label}</Text><Text style={styles.settingHint}>{hint}</Text></View>
+    <View style={styles.stepper}>
+      <Pressable accessibilityLabel={`Decrease ${label}`} onPress={() => onChange(clampReminderValue(value - step, min, max))} style={styles.stepButton}><Text style={styles.stepText}>−</Text></Pressable>
+      <Text style={styles.stepValue}>{value === 0 ? 'OFF' : `${value}${suffix}`}</Text>
+      <Pressable accessibilityLabel={`Increase ${label}`} onPress={() => onChange(clampReminderValue(value + step, min, max))} style={styles.stepButton}><Text style={styles.stepText}>+</Text></Pressable>
+    </View>
+  </View>;
+}
+
+function ReminderEditor({ color, index, onChange, onDelete, reminder }: { color: string; index: number; onChange: (changes: Partial<EditableReminder>) => void; onDelete: () => void; reminder: EditableReminder }) {
+  const [expanded, setExpanded] = useState(false);
+  const nagSummary = reminder.followupCount === 0 ? 'no follow-ups' : `${reminder.followupCount} follow-up${reminder.followupCount === 1 ? '' : 's'} every ${reminder.followupMinutes}m`;
+  return <View style={styles.reminderBlock}>
+    <View style={styles.reminderRow}>
+      <Pressable accessibilityLabel={`Turn reminder ${index + 1} ${reminder.enabled ? 'off' : 'on'}`} onPress={() => onChange({ enabled: !reminder.enabled })} style={[styles.reminderToggle, reminder.enabled && { backgroundColor: color }]}><View style={[styles.toggleKnob, reminder.enabled && styles.toggleKnobOn]} /></Pressable>
+      <View style={styles.reminderIdentity}><Text style={styles.reminderName}>{(reminder.label?.trim() || `REMINDER ${index + 1}`).toUpperCase()}</Text><Text style={[styles.reminderBigTime, !reminder.enabled && styles.muted]}>{formatTime(reminder.hour, reminder.minute)}</Text></View>
+      <Pressable accessibilityLabel={`Set reminder ${index + 1} time`} onPress={() => openTimePicker(reminder.hour, reminder.minute, (hour, minute) => onChange({ hour, minute }))} style={styles.timePickerButton}><Text style={styles.timePickerIcon}>◷</Text><Text style={styles.timePickerLabel}>SET TIME</Text></Pressable>
+      <Pressable accessibilityLabel={`Delete reminder ${index + 1}`} onPress={onDelete} style={styles.deleteReminder}><Text style={styles.deleteReminderText}>×</Text></Pressable>
+    </View>
+    <Pressable onPress={() => setExpanded((value) => !value)} style={styles.optionsToggle}>
+      <Text style={styles.optionsSummary}>{nagSummary} · snooze {reminder.snoozeMinutes}m</Text>
+      <Text style={styles.optionsChevron}>{expanded ? '˄' : '˅'}</Text>
+    </Pressable>
+    {expanded && <View style={styles.optionsPanel}>
+      <Text style={styles.optionLabel}>NOTIFICATION TITLE</Text>
+      <TextInput maxLength={120} onChangeText={(value) => onChange({ label: value })} placeholder="Habit name" placeholderTextColor="#5E5E66" style={styles.optionInput} value={reminder.label ?? ''} />
+      <Text style={[styles.optionLabel, styles.optionLabelSpaced]}>MESSAGE</Text>
+      <TextInput maxLength={120} onChangeText={(value) => onChange({ body: value })} placeholder="Due now." placeholderTextColor="#5E5E66" style={styles.optionInput} value={reminder.body ?? ''} />
+      <ReminderStepper hint="Extra nudges if you have not logged it yet" label="FOLLOW-UPS" max={5} min={0} onChange={(value) => onChange({ followupCount: value })} step={1} suffix="×" value={reminder.followupCount} />
+      <ReminderStepper hint="Gap between each follow-up" label="FOLLOW-UP GAP" max={120} min={5} onChange={(value) => onChange({ followupMinutes: value })} step={5} suffix="m" value={reminder.followupMinutes} />
+      <ReminderStepper hint="How long the Snooze button waits" label="SNOOZE" max={120} min={5} onChange={(value) => onChange({ snoozeMinutes: value })} step={5} suffix="m" value={reminder.snoozeMinutes} />
+    </View>}
+  </View>;
+}
+
 function EditHabit({ habit, onClose, onSave }: { habit: Habit; onClose: () => void; onSave: (name: string, color: string, goal: number, reminders: EditableReminder[]) => Promise<void> }) {
   const [draftName, setDraftName] = useState(habit.name);
   const [color, setColor] = useState(habit.color);
   const [goal, setGoal] = useState(habit.dailyGoal);
   const [saving, setSaving] = useState(false);
   const [reminders, setReminders] = useState<EditableReminder[]>(() => habit.reminders.map((item) => ({ ...item, key: String(item.id) })));
-  const setReminderTime = (key: string, hour: number, minute: number) => setReminders((items) => items.map((item) => item.key === key ? { ...item, hour, minute } : item));
+  const updateReminder = (key: string, changes: Partial<EditableReminder>) => setReminders((items) => items.map((item) => item.key === key ? { ...item, ...changes } : item));
   const save = async () => { if (!draftName.trim() || saving) return; setSaving(true); try { await onSave(draftName.trim(), color, goal, reminders); } finally { setSaving(false); } };
   return <Modal animationType="slide" onRequestClose={onClose} visible>
     <SafeAreaView edges={['top', 'bottom']} style={styles.editScreen}>
@@ -176,14 +222,16 @@ function EditHabit({ habit, onClose, onSave }: { habit: Habit; onClose: () => vo
         <View style={styles.colorGrid}>{COLORS.map((option) => <Pressable accessibilityLabel={`Use color ${option}`} key={option} onPress={() => setColor(option)} style={[styles.colorChoice, { backgroundColor: option }, color === option && styles.colorSelected]}>{color === option && <Text style={styles.colorCheck}>✓</Text>}</Pressable>)}</View>
         <Text style={styles.editLabel}>HOW MANY TIMES PER DAY?</Text>
         <View style={styles.goalEditor}><View><Text style={styles.goalNumber}>{goal}×</Text><Text style={styles.settingHint}>Each notification action increments progress</Text></View><View style={styles.stepper}><Pressable onPress={() => setGoal(Math.max(1, goal - 1))} style={styles.largeStep}><Text style={styles.stepText}>−</Text></Pressable><Pressable onPress={() => setGoal(Math.min(20, goal + 1))} style={styles.largeStep}><Text style={styles.stepText}>+</Text></Pressable></View></View>
-        <View style={styles.reminderHeading}><View><Text style={styles.editLabelNoMargin}>REMINDERS</Text><Text style={styles.settingHint}>Choose every time you want to be notified</Text></View><Pressable accessibilityLabel="Add reminder" onPress={() => setReminders((items) => [...items, { key: `${Date.now()}`, hour: 9, minute: 0, enabled: true }])} style={styles.addReminder}><Text style={styles.addReminderText}>+</Text></Pressable></View>
+        <View style={styles.reminderHeading}><View><Text style={styles.editLabelNoMargin}>REMINDERS</Text><Text style={styles.settingHint}>Choose every time you want to be notified</Text></View><Pressable accessibilityLabel="Add reminder" onPress={() => setReminders((items) => [...items, newReminder()])} style={styles.addReminder}><Text style={styles.addReminderText}>+</Text></Pressable></View>
         {reminders.length === 0 && <View style={styles.noReminders}><Text style={styles.noRemindersTitle}>NO REMINDERS</Text><Text style={styles.settingHint}>Tap + to add a notification time.</Text></View>}
-        {reminders.map((reminder, index) => <View key={reminder.key} style={styles.reminderRow}>
-          <Pressable onPress={() => setReminders((items) => items.map((item) => item.key === reminder.key ? { ...item, enabled: !item.enabled } : item))} style={[styles.reminderToggle, reminder.enabled && { backgroundColor: color }]}><View style={[styles.toggleKnob, reminder.enabled && styles.toggleKnobOn]} /></Pressable>
-          <View style={styles.reminderIdentity}><Text style={styles.reminderName}>REMINDER {index + 1}</Text><Text style={[styles.reminderBigTime, !reminder.enabled && styles.muted]}>{formatTime(reminder.hour, reminder.minute)}</Text></View>
-          <Pressable accessibilityLabel={`Set reminder ${index + 1} time`} onPress={() => openTimePicker(reminder.hour, reminder.minute, (hour, minute) => setReminderTime(reminder.key, hour, minute))} style={styles.timePickerButton}><Text style={styles.timePickerIcon}>◷</Text><Text style={styles.timePickerLabel}>SET TIME</Text></Pressable>
-          <Pressable accessibilityLabel={`Delete reminder ${index + 1}`} onPress={() => setReminders((items) => items.filter((item) => item.key !== reminder.key))} style={styles.deleteReminder}><Text style={styles.deleteReminderText}>×</Text></Pressable>
-        </View>)}
+        {reminders.map((reminder, index) => <ReminderEditor
+          color={color}
+          index={index}
+          key={reminder.key}
+          onChange={(changes) => updateReminder(reminder.key, changes)}
+          onDelete={() => setReminders((items) => items.filter((item) => item.key !== reminder.key))}
+          reminder={reminder}
+        />)}
         <Pressable disabled={!draftName.trim() || saving} onPress={save} style={[styles.saveHabitButton, (!draftName.trim() || saving) && styles.disabled]}><Text style={styles.saveHabitText}>{saving ? 'SAVING…' : 'SAVE HABIT'}</Text></Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -197,17 +245,82 @@ export default function App() {
   const [adding, setAdding] = useState(false);
   const [selectedHabitId, setSelectedHabitId] = useState<number | null>(null);
   const [editingHabitId, setEditingHabitId] = useState<number | null>(null);
-  const [activeScreen, setActiveScreen] = useState<'habits' | 'analytics'>('habits');
+  const [activeScreen, setActiveScreen] = useState<'habits' | 'analytics' | 'logs' | 'backup'>('habits');
+  const [backupBusy, setBackupBusy] = useState(false);
   const [viewedMonth, setViewedMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
-  const refresh = useCallback(async () => setHabits(await getHabits()), []);
+  const [health, setHealth] = useState<NotificationHealth | null>(null);
+  const [missed, setMissed] = useState<Awaited<ReturnType<typeof getMissedToday>>>([]);
+  const refresh = useCallback(async () => { setHabits(await getHabits()); setMissed(await getMissedToday()); }, []);
+
+  /**
+   * One reconcile pass: re-arm every alarm, refresh the health verdict, and post a
+   * catch-up for anything already overdue. Runs on launch and on every return to the
+   * foreground, which is what keeps a reminder self-healing after a reboot or an
+   * Android-side cancellation.
+   */
+  const syncReminders = useCallback(async (requestPermission: boolean) => {
+    const next = await configureNotifications(requestPermission);
+    setHealth(next);
+    await notifyMissedReminders();
+    setMissed(await getMissedToday());
+    return next;
+  }, []);
+
+  // Re-arming touches every reminder and its follow-ups, so doing it on each tap of a
+  // 15-minute stepper drops taps while the previous pass is still running. Coalesce them,
+  // and run them one at a time: two passes overlapping a habit save deadlock on SQLite.
+  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const syncQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const runSync = useCallback((requestPermission: boolean): Promise<NotificationHealth> => {
+    if (syncTimer.current) { clearTimeout(syncTimer.current); syncTimer.current = null; }
+    const next = syncQueue.current.catch(() => undefined).then(() => syncReminders(requestPermission));
+    syncQueue.current = next;
+    return next;
+  }, [syncReminders]);
+  useEffect(() => () => { if (syncTimer.current) clearTimeout(syncTimer.current); }, []);
+
+  const showNotificationProblem = useCallback(async (health: NotificationHealth) => {
+    if (health.ready) {
+      await setSetting('notification_problem_seen', '');
+      return;
+    }
+    if (await getSetting('notification_problem_seen') === health.issue) return;
+    await setSetting('notification_problem_seen', health.issue ?? 'unknown');
+    // Each issue gets the screen that resolves it; a generic "open settings" leaves the
+    // user hunting for a toggle three levels down in Android's app info page.
+    const remedy = health.issue === 'permission-denied'
+      ? { message: 'Notifications are not allowed, so no reminder can reach you.', label: 'Allow notifications', fix: openNotificationSettings }
+      : health.issue === 'channel-disabled'
+        ? { message: 'The important reminders channel is turned off, so reminders are scheduled but never shown.', label: 'Open channel', fix: openNotificationSettings }
+        : health.issue === 'exact-alarms-blocked'
+          ? { message: 'Android will not let HabbitDot set exact alarms, so it is free to delay a reminder past the time you set or drop it entirely. Turn on "Alarms & reminders".', label: 'Fix now', fix: openExactAlarmSettings }
+          : health.issue === 'alarms-missing' || health.issue === 'alarms-repaired'
+            ? { message: health.issue === 'alarms-repaired' ? 'Android removed reminder alarms while HabbitDot was closed. They have been restored; unrestricted battery use can prevent this happening overnight.' : 'Expo remembers the reminders, but Android removed their alarms. Review battery settings and return to re-arm them.', label: 'Review battery', fix: openBatteryOptimizationSettings }
+          : health.issue === 'battery-optimized'
+            ? { message: 'Battery optimisation is on for HabbitDot. Allowing unrestricted battery use makes reminders more dependable on this phone.', label: 'Review battery', fix: openBatteryOptimizationSettings }
+            : { message: 'Android did not accept every reminder. Open the logs to see which one failed.', label: 'Open settings', fix: openNotificationSettings };
+    Alert.alert('Reminders need attention', remedy.message, [
+      { text: 'Later', style: 'cancel' },
+      { text: remedy.label, onPress: remedy.fix },
+    ]);
+  }, []);
+
+  const scheduleSync = useCallback(() => {
+    if (syncTimer.current) clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(() => { syncTimer.current = null; runSync(false).then(showNotificationProblem).catch(console.error); }, 900);
+  }, [runSync, showNotificationProblem]);
 
   useEffect(() => {
     let notificationSubscription: { remove: () => void } | undefined;
     initializeDatabase().then(async () => {
+      await addDiagnosticLog('info', 'app.started', 'HabbitDot initialized and began its notification health check.', { appState: AppState.currentState });
       await refresh();
-      const notificationReady = await configureNotifications();
-      if (notificationReady) {
-        notificationSubscription = (await listenForNotificationActions(refresh)) ?? undefined;
+      const notificationHealth = await runSync(true);
+      await showNotificationProblem(notificationHealth);
+      if (notificationHealth.ready) {
+        notificationSubscription = (await listenForNotificationActions(refresh, setSelectedHabitId)) ?? undefined;
+        const openedHabitId = await getLastOpenedHabitId();
+        if (openedHabitId) setSelectedHabitId(openedHabitId);
         if (await getSetting('notification_delivery_check') !== '2') {
           await scheduleDeliveryVerification();
           await setSetting('notification_delivery_check', '2');
@@ -215,7 +328,15 @@ export default function App() {
       }
     }).catch((error) => Alert.alert('Could not initialize HabbitDot', String(error))).finally(() => setLoading(false));
     return () => notificationSubscription?.remove();
-  }, [refresh]);
+  }, [refresh, runSync, showNotificationProblem]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') runSync(false).then(showNotificationProblem).catch(console.error);
+    });
+    return () => subscription.remove();
+  }, [runSync, showNotificationProblem]);
+
 
   async function createHabit() {
     const trimmed = name.trim();
@@ -224,15 +345,61 @@ export default function App() {
     setName(''); setAdding(false); await refresh();
   }
 
-  async function markDay(habitId: number, date: string) { await toggleEntry(habitId, date); await refresh(); if (date === dateKey(new Date())) await configureNotifications(); }
-  async function changeGoal(habitId: number, goal: number) { await updateDailyGoal(habitId, goal); await refresh(); await configureNotifications(); }
-  async function changeReminder(habitId: number, hour: number, minute: number, enabled: boolean) { await updatePrimaryReminder(habitId, hour, minute, enabled); await refresh(); await configureNotifications(); }
+  async function markDay(habitId: number, date: string) { await toggleEntry(habitId, date); await refresh(); if (date === dateKey(new Date())) { await dismissRemindersFor(habitId); scheduleSync(); } }
+  async function changeGoal(habitId: number, goal: number) { await updateDailyGoal(habitId, goal); await refresh(); scheduleSync(); }
+  async function changeReminder(habitId: number, hour: number, minute: number, enabled: boolean) { await updatePrimaryReminder(habitId, hour, minute, enabled); await refresh(); scheduleSync(); }
   async function saveHabitEdits(habitId: number, nextName: string, color: string, goal: number, reminders: EditableReminder[]) {
     await updateHabit(habitId, nextName, color, goal);
-    await replaceHabitReminders(habitId, reminders.map(({ hour, minute, enabled }) => ({ hour, minute, enabled })));
+    await replaceHabitReminders(habitId, reminders.map(({ key, ...reminder }) => reminder));
     await refresh();
-    await configureNotifications();
     setEditingHabitId(null);
+    // After the modal closes, so a reconcile problem can never strand the editor.
+    await runSync(false).then(showNotificationProblem);
+  }
+
+  async function exportBackup() {
+    if (backupBusy) return;
+    setBackupBusy(true);
+    try {
+      if (!await Sharing.isAvailableAsync()) throw new Error('File sharing is unavailable on this device.');
+      const backup = await createBackup();
+      const day = new Date().toISOString().slice(0, 10);
+      const file = new File(Paths.cache, `habbitdot-backup-${day}.json`);
+      file.write(JSON.stringify(backup, null, 2));
+      await Sharing.shareAsync(file.uri, { dialogTitle: 'Save HabbitDot backup', mimeType: 'application/json' });
+    } catch (error) {
+      Alert.alert('Could not export backup', error instanceof Error ? error.message : String(error));
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function importBackup() {
+    if (backupBusy) return;
+    setBackupBusy(true);
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({ type: ['application/json', 'text/json', 'text/plain'], copyToCacheDirectory: true, multiple: false });
+      if (picked.canceled) return;
+      if ((picked.assets[0].size ?? 0) > 10_000_000) throw new Error('Backup is larger than the 10 MB safety limit.');
+      const backup = parseBackup(await new File(picked.assets[0].uri).text());
+      const confirmed = await new Promise<boolean>((resolve) => Alert.alert(
+        'Replace current data?',
+        `This valid backup contains ${backup.habits.length} habits and ${backup.entries.length} check-ins. Your current HabbitDot data will be replaced.`,
+        [{ text: 'Cancel', style: 'cancel', onPress: () => resolve(false) }, { text: 'Restore backup', style: 'destructive', onPress: () => resolve(true) }],
+        { cancelable: true, onDismiss: () => resolve(false) },
+      ));
+      if (!confirmed) return;
+      await restoreBackup(backup);
+      setSelectedHabitId(null);
+      setEditingHabitId(null);
+      await refresh();
+      await showNotificationProblem(await runSync(false));
+      Alert.alert('Backup restored', `${backup.habits.length} habits and ${backup.entries.length} check-ins were restored.`);
+    } catch (error) {
+      Alert.alert('Could not import backup', error instanceof Error ? error.message : String(error));
+    } finally {
+      setBackupBusy(false);
+    }
   }
 
   return (
@@ -250,6 +417,11 @@ export default function App() {
 
           {adding && <View style={styles.composer}><TextInput autoFocus onChangeText={setName} onSubmitEditing={createHabit} placeholder="NAME YOUR HABIT" placeholderTextColor="#77777E" returnKeyType="done" style={styles.input} value={name} /><Pressable disabled={!name.trim()} onPress={createHabit} style={[styles.saveButton, !name.trim() && styles.disabled]}><Text style={styles.saveText}>SAVE</Text></Pressable></View>}
 
+          {!loading && <View style={styles.banners}>
+            <ReminderHealthBanner health={health} onOpenLogs={() => { setAdding(false); setActiveScreen('logs'); }} />
+            <MissedTodayBanner missed={missed} onLog={(habitId) => markDay(habitId, dateKey(new Date()))} />
+          </View>}
+
           {loading ? <ActivityIndicator color="#B7F171" style={styles.loader} /> : (
             <FlatList contentContainerStyle={styles.list} data={habits} keyExtractor={(item) => String(item.id)} renderItem={({ item }) => <HabitCard habit={item} onOpen={(habit) => { setSelectedHabitId(habit.id); setViewedMonth(new Date(new Date().getFullYear(), new Date().getMonth(), 1)); }} onToggle={markDay} />} showsVerticalScrollIndicator={false}
               ListEmptyComponent={<View style={styles.empty}><View style={styles.emptyOrbit}><View style={styles.emptyCenter} /></View><Text style={styles.emptyTitle}>YOUR GRID IS READY</Text><Text style={styles.emptyBody}>Tap + to add a habit. Each day becomes a dot in your story.</Text></View>} />
@@ -257,10 +429,25 @@ export default function App() {
 
           {selectedHabitId !== null && habits.find((habit) => habit.id === selectedHabitId) && <HabitDetail habit={habits.find((habit) => habit.id === selectedHabitId)!} month={viewedMonth} onChangeMonth={(offset) => setViewedMonth((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1))} onClose={() => setSelectedHabitId(null)} onEdit={() => { setEditingHabitId(selectedHabitId); setSelectedHabitId(null); }} onGoal={(goal) => changeGoal(selectedHabitId, goal)} onReminder={(hour, minute, enabled) => changeReminder(selectedHabitId, hour, minute, enabled)} onToggle={markDay} />}
           {editingHabitId !== null && habits.find((habit) => habit.id === editingHabitId) && <EditHabit habit={habits.find((habit) => habit.id === editingHabitId)!} onClose={() => setEditingHabitId(null)} onSave={(nextName, color, goal, reminders) => saveHabitEdits(editingHabitId, nextName, color, goal, reminders)} />}
-          </> : loading ? <ActivityIndicator color="#B7F171" style={styles.loader} /> : <AnalyticsScreen habits={habits} />}
+          </> : activeScreen === 'analytics' ? (loading ? <ActivityIndicator color="#B7F171" style={styles.loader} /> : <AnalyticsScreen habits={habits} />) : activeScreen === 'logs' ? <NotificationLogsScreen health={health} onRecheck={() => runSync(false)} /> : (
+            <ScrollView contentContainerStyle={styles.backupScreen}>
+              <Text style={styles.backupEyebrow}>DATA OWNERSHIP</Text>
+              <Text style={styles.backupTitle}>BACKUP & RESTORE</Text>
+              <Text style={styles.backupBody}>Export a portable JSON file containing every habit, reminder, check-in, and app setting. Keep it somewhere safe.</Text>
+              <Pressable accessibilityLabel="Export HabbitDot backup" disabled={backupBusy} onPress={exportBackup} style={({ pressed }) => [styles.backupPrimary, (pressed || backupBusy) && styles.pressed]}>
+                {backupBusy ? <ActivityIndicator color="#101012" /> : <><Text style={styles.backupPrimaryTitle}>EXPORT BACKUP</Text><Text style={styles.backupPrimaryHint}>Save or share a .json file</Text></>}
+              </Pressable>
+              <View style={styles.backupDivider} />
+              <Text style={styles.backupWarningTitle}>RESTORE FROM FILE</Text>
+              <Text style={styles.backupWarning}>The file is fully validated first. Nothing changes until you confirm. Restore is transactional, so an error cannot leave a partial database.</Text>
+              <Pressable accessibilityLabel="Import HabbitDot backup" disabled={backupBusy} onPress={importBackup} style={({ pressed }) => [styles.backupSecondary, (pressed || backupBusy) && styles.pressed]}><Text style={styles.backupSecondaryText}>CHOOSE BACKUP FILE</Text></Pressable>
+            </ScrollView>
+          )}
           <View style={styles.bottomNav}>
             <Pressable accessibilityLabel="Habits" onPress={() => setActiveScreen('habits')} style={styles.navItem}><Text style={[styles.navIcon, activeScreen === 'habits' && styles.navActive]}>▦</Text><Text style={[styles.navLabel, activeScreen === 'habits' && styles.navActive]}>HABITS</Text></Pressable>
             <Pressable accessibilityLabel="Analytics" onPress={() => { setAdding(false); setActiveScreen('analytics'); }} style={styles.navItem}><Text style={[styles.navIcon, activeScreen === 'analytics' && styles.navActive]}>◔</Text><Text style={[styles.navLabel, activeScreen === 'analytics' && styles.navActive]}>ANALYTICS</Text></Pressable>
+            <Pressable accessibilityLabel="Notification logs" onPress={() => { setAdding(false); setActiveScreen('logs'); }} style={styles.navItem}><Text style={[styles.navIcon, activeScreen === 'logs' && styles.navActive]}>!</Text><Text style={[styles.navLabel, activeScreen === 'logs' && styles.navActive]}>LOGS</Text></Pressable>
+            <Pressable accessibilityLabel="Backup and restore" onPress={() => { setAdding(false); setActiveScreen('backup'); }} style={styles.navItem}><Text style={[styles.navIcon, activeScreen === 'backup' && styles.navActive]}>⇅</Text><Text style={[styles.navLabel, activeScreen === 'backup' && styles.navActive]}>BACKUP</Text></Pressable>
           </View>
         </View>
       </SafeAreaView>
@@ -276,11 +463,23 @@ const styles = StyleSheet.create({
   card: { backgroundColor: '#101012', borderColor: '#29292E', borderRadius: 10, borderWidth: 1, marginBottom: 8, padding: 9 }, cardHeader: { alignItems: 'center', flexDirection: 'row', marginBottom: 7 }, habitIcon: { alignItems: 'center', borderRadius: 8, height: 34, justifyContent: 'center', width: 38 }, iconDot: { borderRadius: 7, borderWidth: 2, height: 14, width: 14 }, habitIdentity: { flex: 1, marginLeft: 9 }, habitName: { color: '#F1F1EF', fontFamily: 'monospace', fontSize: 12, fontWeight: '900', letterSpacing: 0.9 }, habitMeta: { color: '#6E6E75', fontFamily: 'monospace', fontSize: 6, fontWeight: '800', letterSpacing: 1.1, marginTop: 2 }, todayButton: { alignItems: 'center', borderRadius: 8, borderWidth: 1, height: 34, justifyContent: 'center', width: 43 }, todayCheck: { fontFamily: 'monospace', fontSize: 14, fontWeight: '900' }, todayCheckActive: { fontSize: 15 }, statsStrip: { borderRadius: 4, flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8, paddingHorizontal: 7, paddingVertical: 4 }, statText: { color: '#E3E3E1', fontFamily: 'monospace', fontSize: 6, fontWeight: '900', letterSpacing: 0.3 }, historyRow: { flexDirection: 'row' }, weekdayLabels: { gap: 2, marginRight: 5 }, weekday: { color: '#707077', fontFamily: 'monospace', fontSize: 6, fontWeight: '800', height: 9, lineHeight: 9, textAlign: 'center', width: 8 }, weeks: { flex: 1, flexDirection: 'row', justifyContent: 'space-between' }, weekColumn: { gap: 2 }, historyDot: { borderRadius: 5, height: 9, width: 9 }, futureDot: { backgroundColor: '#1D1D21', opacity: 0.65 }, monthLabels: { flexDirection: 'row', justifyContent: 'space-around', marginLeft: 13, marginTop: 5 }, monthLabel: { color: '#5F5F66', fontFamily: 'monospace', fontSize: 5, fontWeight: '800', letterSpacing: 0.7 },
   empty: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 48, paddingTop: 120 }, emptyOrbit: { alignItems: 'center', borderColor: '#B7F171', borderRadius: 36, borderWidth: 2, height: 72, justifyContent: 'center', width: 72 }, emptyCenter: { backgroundColor: '#B7F171', borderRadius: 8, height: 16, width: 16 }, emptyTitle: { color: '#F4F4F2', fontSize: 18, fontWeight: '900', letterSpacing: 1, marginTop: 22 }, emptyBody: { color: '#85858C', fontSize: 13, lineHeight: 20, marginTop: 8, textAlign: 'center' },
   bottomNav: { backgroundColor: '#111114', borderTopColor: '#242428', borderTopWidth: 1, bottom: 0, flexDirection: 'row', left: 0, paddingBottom: 8, paddingTop: 8, position: 'absolute', right: 0 }, navItem: { alignItems: 'center', flex: 1 }, navIcon: { color: '#68686F', fontSize: 13, height: 17 }, navLabel: { color: '#68686F', fontFamily: 'monospace', fontSize: 5, fontWeight: '900', letterSpacing: 0.7, marginTop: 2 }, navActive: { color: '#B7F171' },
+  backupScreen: { flexGrow: 1, paddingBottom: 110, paddingHorizontal: 20, paddingTop: 34 }, backupEyebrow: { color: '#B7F171', fontFamily: 'monospace', fontSize: 8, fontWeight: '900', letterSpacing: 1.5 }, backupTitle: { color: '#F4F4F2', fontSize: 25, fontWeight: '900', letterSpacing: 1, marginTop: 7 }, backupBody: { color: '#929299', fontSize: 13, lineHeight: 20, marginTop: 12 }, backupPrimary: { backgroundColor: '#B7F171', borderRadius: 13, marginTop: 28, minHeight: 76, paddingHorizontal: 18, paddingVertical: 16 }, backupPrimaryTitle: { color: '#101012', fontSize: 13, fontWeight: '900', letterSpacing: 1 }, backupPrimaryHint: { color: '#344124', fontSize: 9, fontWeight: '700', marginTop: 5 }, backupDivider: { backgroundColor: '#2B2B30', height: 1, marginVertical: 30 }, backupWarningTitle: { color: '#F4F4F2', fontSize: 12, fontWeight: '900', letterSpacing: 1 }, backupWarning: { color: '#85858C', fontSize: 11, lineHeight: 18, marginTop: 9 }, backupSecondary: { alignItems: 'center', borderColor: '#55555C', borderRadius: 12, borderWidth: 1, marginTop: 20, paddingVertical: 17 }, backupSecondaryText: { color: '#F4F4F2', fontSize: 10, fontWeight: '900', letterSpacing: 0.8 },
   modalBackdrop: { backgroundColor: 'rgba(0,0,0,0.72)', flex: 1, justifyContent: 'flex-end' }, detailSheet: { backgroundColor: '#0B0B0D', borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '90%' }, detailContent: { padding: 14, paddingBottom: 22 },
   detailHeader: { alignItems: 'center', flexDirection: 'row', marginBottom: 10 }, detailIcon: { alignItems: 'center', borderRadius: 10, height: 44, justifyContent: 'center', width: 48 }, detailName: { color: '#F4F4F2', fontSize: 17, fontWeight: '900', letterSpacing: 0.8 }, editButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 10, height: 40, justifyContent: 'center', marginRight: 6, width: 44 }, editButtonText: { color: '#F4F4F2', fontSize: 21 }, closeButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 10, height: 40, justifyContent: 'center', width: 44 }, closeText: { color: '#F4F4F2', fontSize: 25, lineHeight: 27 },
   overviewBox: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, marginBottom: 12, padding: 9 }, calendarBox: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, padding: 8 }, calendarWeek: { flexDirection: 'row', marginBottom: 6 }, calendarWeekday: { color: '#77777E', flex: 1, fontSize: 8, fontWeight: '900', textAlign: 'center' }, calendarGrid: { flexDirection: 'row', flexWrap: 'wrap' },
   calendarCell: { alignItems: 'center', borderColor: '#29292E', borderRadius: 7, borderWidth: 1, height: 47, justifyContent: 'center', margin: '0.5%', width: '13.28%' }, calendarOutside: { borderColor: 'transparent', opacity: 0.16 }, calendarDay: { color: '#E6E6E4', fontSize: 12, fontWeight: '900' }, calendarState: { color: '#626269', fontSize: 5, fontWeight: '900', letterSpacing: 0.3, marginTop: 2 },
   monthControls: { flexDirection: 'row', gap: 7, marginTop: 11 }, monthArrow: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 9, height: 42, justifyContent: 'center', width: 46 }, monthArrowText: { color: '#F4F4F2', fontSize: 25 }, monthName: { alignItems: 'center', borderColor: '#303036', borderRadius: 9, borderWidth: 1, flex: 1, justifyContent: 'center' }, yearBox: { alignItems: 'center', borderColor: '#303036', borderRadius: 9, borderWidth: 1, justifyContent: 'center', width: 65 }, monthNameText: { color: '#F4F4F2', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   reminderSettings: { borderColor: '#303036', borderRadius: 10, borderWidth: 1, marginBottom: 12, paddingHorizontal: 10 }, settingLine: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', minHeight: 54 }, settingTitle: { color: '#F4F4F2', fontSize: 9, fontWeight: '900', letterSpacing: 0.7 }, settingHint: { color: '#6F6F76', fontSize: 7, marginTop: 3 }, settingDivider: { backgroundColor: '#29292E', height: 1 }, stepper: { alignItems: 'center', flexDirection: 'row', gap: 7 }, stepButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 7, height: 30, justifyContent: 'center', width: 30 }, stepText: { color: '#F4F4F2', fontSize: 17, fontWeight: '700' }, stepValue: { color: '#B7F171', fontSize: 12, fontWeight: '900', minWidth: 28, textAlign: 'center' }, reminderTime: { color: '#B7F171', fontSize: 9, fontWeight: '900', minWidth: 62, textAlign: 'center' },
-  editScreen: { backgroundColor: '#0B0B0D', flex: 1 }, editHeader: { alignItems: 'center', borderBottomColor: '#252529', borderBottomWidth: 1, flexDirection: 'row', gap: 12, paddingHorizontal: 14, paddingVertical: 12 }, editBack: { color: '#F4F4F2', fontSize: 29, lineHeight: 31 }, editTitle: { color: '#F4F4F2', flex: 1, fontSize: 20, fontWeight: '900', letterSpacing: 1.2 }, editDone: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 10, height: 40, justifyContent: 'center', width: 44 }, editDoneText: { color: '#101012', fontSize: 20, fontWeight: '900' }, editContent: { padding: 18, paddingBottom: 42 }, editLabel: { color: '#DADAD8', fontSize: 10, fontWeight: '900', letterSpacing: 1, marginBottom: 10, marginTop: 20 }, editLabelNoMargin: { color: '#DADAD8', fontSize: 10, fontWeight: '900', letterSpacing: 1 }, editInput: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, color: '#F4F4F2', fontSize: 15, fontWeight: '800', letterSpacing: 0.5, paddingHorizontal: 14, paddingVertical: 14 }, colorGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, colorChoice: { alignItems: 'center', borderRadius: 10, height: 48, justifyContent: 'center', width: '22.9%' }, colorSelected: { borderColor: '#FFFFFF', borderWidth: 3 }, colorCheck: { color: '#FFFFFF', fontSize: 18, fontWeight: '900' }, goalEditor: { alignItems: 'center', borderColor: '#303036', borderRadius: 11, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', padding: 14 }, goalNumber: { color: '#F4F4F2', fontSize: 22, fontWeight: '900' }, largeStep: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 9, height: 42, justifyContent: 'center', width: 46 }, reminderHeading: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10, marginTop: 24 }, addReminder: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 9, height: 38, justifyContent: 'center', width: 42 }, addReminderText: { color: '#101012', fontSize: 24 }, noReminders: { borderColor: '#303036', borderRadius: 11, borderStyle: 'dashed', borderWidth: 1, padding: 18 }, noRemindersTitle: { color: '#85858C', fontSize: 10, fontWeight: '900' }, reminderRow: { alignItems: 'center', borderColor: '#303036', borderRadius: 11, borderWidth: 1, flexDirection: 'row', gap: 7, marginBottom: 8, padding: 10 }, reminderToggle: { backgroundColor: '#34343A', borderRadius: 11, height: 22, padding: 3, width: 38 }, toggleKnob: { backgroundColor: '#F4F4F2', borderRadius: 8, height: 16, width: 16 }, toggleKnobOn: { alignSelf: 'flex-end' }, reminderIdentity: { flex: 1 }, reminderName: { color: '#73737A', fontSize: 6, fontWeight: '900', letterSpacing: 0.8 }, reminderBigTime: { color: '#F4F4F2', fontSize: 13, fontWeight: '900', marginTop: 2 }, timePickerButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 8, flexDirection: 'row', gap: 5, height: 34, justifyContent: 'center', paddingHorizontal: 9 }, timePickerIcon: { color: '#F4F4F2', fontSize: 17 }, timePickerLabel: { color: '#F4F4F2', fontSize: 7, fontWeight: '900', letterSpacing: 0.5 }, muted: { color: '#67676D' }, deleteReminder: { alignItems: 'center', height: 30, justifyContent: 'center', width: 25 }, deleteReminderText: { color: '#FF7780', fontSize: 22 }, saveHabitButton: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 12, marginTop: 24, paddingVertical: 17 }, saveHabitText: { color: '#101012', fontSize: 12, fontWeight: '900', letterSpacing: 1 },
+  banners: { paddingHorizontal: 14 },
+  reminderBlock: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, marginBottom: 8 },
+  optionsToggle: { alignItems: 'center', borderTopColor: '#252529', borderTopWidth: 1, flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 9 },
+  optionsSummary: { color: '#7E7E85', fontSize: 8, fontWeight: '700', letterSpacing: 0.4 },
+  optionsChevron: { color: '#7E7E85', fontSize: 12, fontWeight: '900' },
+  optionsPanel: { borderTopColor: '#252529', borderTopWidth: 1, paddingBottom: 6, paddingHorizontal: 12, paddingTop: 12 },
+  optionLabel: { color: '#DADAD8', fontSize: 8, fontWeight: '900', letterSpacing: 0.8 },
+  optionLabelSpaced: { marginTop: 14 },
+  optionInput: { borderColor: '#303036', borderRadius: 9, borderWidth: 1, color: '#F4F4F2', fontSize: 12, fontWeight: '700', marginTop: 7, paddingHorizontal: 11, paddingVertical: 10 },
+  optionRow: { alignItems: 'center', borderTopColor: '#212125', borderTopWidth: 1, flexDirection: 'row', justifyContent: 'space-between', marginTop: 12, paddingVertical: 10 },
+  optionIdentity: { flex: 1, paddingRight: 10 },
+  editScreen: { backgroundColor: '#0B0B0D', flex: 1 }, editHeader: { alignItems: 'center', borderBottomColor: '#252529', borderBottomWidth: 1, flexDirection: 'row', gap: 12, paddingHorizontal: 14, paddingVertical: 12 }, editBack: { color: '#F4F4F2', fontSize: 29, lineHeight: 31 }, editTitle: { color: '#F4F4F2', flex: 1, fontSize: 20, fontWeight: '900', letterSpacing: 1.2 }, editDone: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 10, height: 40, justifyContent: 'center', width: 44 }, editDoneText: { color: '#101012', fontSize: 20, fontWeight: '900' }, editContent: { padding: 18, paddingBottom: 42 }, editLabel: { color: '#DADAD8', fontSize: 10, fontWeight: '900', letterSpacing: 1, marginBottom: 10, marginTop: 20 }, editLabelNoMargin: { color: '#DADAD8', fontSize: 10, fontWeight: '900', letterSpacing: 1 }, editInput: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, color: '#F4F4F2', fontSize: 15, fontWeight: '800', letterSpacing: 0.5, paddingHorizontal: 14, paddingVertical: 14 }, colorGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 9 }, colorChoice: { alignItems: 'center', borderRadius: 10, height: 48, justifyContent: 'center', width: '22.9%' }, colorSelected: { borderColor: '#FFFFFF', borderWidth: 3 }, colorCheck: { color: '#FFFFFF', fontSize: 18, fontWeight: '900' }, goalEditor: { alignItems: 'center', borderColor: '#303036', borderRadius: 11, borderWidth: 1, flexDirection: 'row', justifyContent: 'space-between', padding: 14 }, goalNumber: { color: '#F4F4F2', fontSize: 22, fontWeight: '900' }, largeStep: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 9, height: 42, justifyContent: 'center', width: 46 }, reminderHeading: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10, marginTop: 24 }, addReminder: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 9, height: 38, justifyContent: 'center', width: 42 }, addReminderText: { color: '#101012', fontSize: 24 }, noReminders: { borderColor: '#303036', borderRadius: 11, borderStyle: 'dashed', borderWidth: 1, padding: 18 }, noRemindersTitle: { color: '#85858C', fontSize: 10, fontWeight: '900' }, reminderRow: { alignItems: 'center', flexDirection: 'row', gap: 7, padding: 10 }, reminderToggle: { backgroundColor: '#34343A', borderRadius: 11, height: 22, padding: 3, width: 38 }, toggleKnob: { backgroundColor: '#F4F4F2', borderRadius: 8, height: 16, width: 16 }, toggleKnobOn: { alignSelf: 'flex-end' }, reminderIdentity: { flex: 1 }, reminderName: { color: '#73737A', fontSize: 6, fontWeight: '900', letterSpacing: 0.8 }, reminderBigTime: { color: '#F4F4F2', fontSize: 13, fontWeight: '900', marginTop: 2 }, timePickerButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 8, flexDirection: 'row', gap: 5, height: 34, justifyContent: 'center', paddingHorizontal: 9 }, timePickerIcon: { color: '#F4F4F2', fontSize: 17 }, timePickerLabel: { color: '#F4F4F2', fontSize: 7, fontWeight: '900', letterSpacing: 0.5 }, muted: { color: '#67676D' }, deleteReminder: { alignItems: 'center', height: 30, justifyContent: 'center', width: 25 }, deleteReminderText: { color: '#FF7780', fontSize: 22 }, saveHabitButton: { alignItems: 'center', backgroundColor: '#F4F4F2', borderRadius: 12, marginTop: 24, paddingVertical: 17 }, saveHabitText: { color: '#101012', fontSize: 12, fontWeight: '900', letterSpacing: 1 },
 });

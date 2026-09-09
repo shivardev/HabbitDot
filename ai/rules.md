@@ -1,0 +1,4 @@
+- Use the wsl 2 linked mounted drive to generate the apk , just to clean prebuild in windows and then ./gradle in wsl for APK and install that into the phone connected via USB debugging. when installing make sure the exsting data in the app does not get
+- when a code is changed we need to test that either in expo go if they are UI ish changes or install apk in usb connected android phone if none are connected ask the user to connect a phone.
+- while implementing a feature we need to be professional and cover end to end including edge cases , for example a notification usecase needs to be built fully with customization. actions, when clicked on noticaiotn app opening. etc. everything will not be mentioned in the prompt.
+- When installing APK make sure to not messsing with the existing data in the app.
