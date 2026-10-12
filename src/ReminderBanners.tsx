@@ -17,7 +17,7 @@ const timeLabel = (hour: number, minute: number) =>
  * that resolves it. "Alarms & reminders is off" means nothing; "reminders can arrive late
  * or not at all" is the reason to walk into Settings.
  */
-const ISSUE_COPY: Record<NotificationIssue, { severity: 'error' | 'warning'; title: string; body: string; action: string; fix: () => void }> = {
+const ISSUE_COPY: Record<NotificationIssue, { severity: 'error' | 'warning'; title: string; body: string; short?: string; action: string; fix: () => void }> = {
   'permission-denied': {
     severity: 'error',
     title: 'REMINDERS ARE BLOCKED',
@@ -49,6 +49,7 @@ const ISSUE_COPY: Record<NotificationIssue, { severity: 'error' | 'warning'; tit
   'alarms-repaired': {
     severity: 'warning',
     title: 'REMINDER ALARMS WERE RESTORED',
+    short: 'Android removed some alarms; they are re-armed',
     body: 'Android removed one or more reminder alarms while HabbitDot was closed. They are armed again; unrestricted battery use can prevent this happening overnight.',
     action: 'REVIEW BATTERY',
     fix: openBatteryOptimizationSettings,
@@ -63,17 +64,34 @@ const ISSUE_COPY: Record<NotificationIssue, { severity: 'error' | 'warning'; tit
   'battery-optimized': {
     severity: 'warning',
     title: 'BATTERY OPTIMISATION IS ON',
+    short: 'Battery optimisation is on',
     body: 'Reminders still work, but some phones kill background apps aggressively. Allowing unrestricted battery use makes delivery more dependable.',
     action: 'REVIEW BATTERY',
     fix: openBatteryOptimizationSettings,
   },
 };
 
-export function ReminderHealthBanner({ health, onOpenLogs }: { health: NotificationHealth | null; onOpenLogs: () => void }) {
-  if (!health || health.issues.length === 0) return null;
+/**
+ * Errors mean a reminder can go missing, so they get the full card and cannot be hidden.
+ * Warnings are advisory and would otherwise sit on the home screen every day, so they
+ * collapse to one dismissible line; the Logs screen still lists them.
+ */
+export function ReminderHealthBanner({ health, dismissed, onDismiss, onOpenLogs }: { health: NotificationHealth | null; dismissed: NotificationIssue[]; onDismiss: (issue: NotificationIssue) => void; onOpenLogs: () => void }) {
+  const issues = health?.issues.filter((issue) => ISSUE_COPY[issue].severity === 'error' || !dismissed.includes(issue)) ?? [];
+  if (issues.length === 0) return null;
   return <View style={styles.stack}>
-    {health.issues.map((issue) => {
+    {issues.map((issue) => {
       const copy = ISSUE_COPY[issue];
+      if (copy.severity === 'warning') {
+        return <View key={issue} style={styles.strip}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`${copy.short ?? copy.title}. Open details`} onPress={onOpenLogs} style={styles.stripLabel}>
+            <View style={styles.stripDot} />
+            <Text numberOfLines={1} style={styles.stripText}>{copy.short ?? copy.title}</Text>
+          </Pressable>
+          <Pressable accessibilityLabel={copy.action} hitSlop={6} onPress={copy.fix} style={styles.stripFix}><Text style={styles.stripFixText}>FIX</Text></Pressable>
+          <Pressable accessibilityLabel={`Hide ${copy.short ?? copy.title}`} hitSlop={8} onPress={() => onDismiss(issue)} style={styles.stripClose}><Text style={styles.stripCloseText}>×</Text></Pressable>
+        </View>;
+      }
       return <View key={issue} style={[styles.card, copy.severity === 'error' ? styles.errorCard : styles.warningCard]}>
         <Text style={[styles.title, copy.severity === 'error' ? styles.errorText : styles.warningText]}>{copy.title}</Text>
         <Text style={styles.body}>{copy.body}</Text>
@@ -105,7 +123,15 @@ export function MissedTodayBanner({ missed, onLog }: { missed: MissedReminder[];
 }
 
 const styles = StyleSheet.create({
-  stack: { gap: 8 },
+  stack: { gap: 8, marginBottom: 6 },
+  strip: { alignItems: 'center', borderColor: '#2A2A2E', borderRadius: 8, borderWidth: 1, flexDirection: 'row', paddingLeft: 10 },
+  stripLabel: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: 7, paddingVertical: 7 },
+  stripDot: { backgroundColor: '#FFB86B', borderRadius: 3, height: 6, width: 6 },
+  stripText: { color: '#A3A3AA', flex: 1, fontSize: 9, fontWeight: '700' },
+  stripFix: { paddingHorizontal: 8, paddingVertical: 7 },
+  stripFixText: { color: '#FFB86B', fontSize: 9, fontWeight: '900', letterSpacing: 0.6 },
+  stripClose: { paddingHorizontal: 10, paddingVertical: 4 },
+  stripCloseText: { color: '#6E6E75', fontSize: 15, fontWeight: '700' },
   card: { backgroundColor: '#111113', borderColor: '#303034', borderLeftWidth: 3, borderRadius: 11, borderWidth: 1, marginBottom: 10, padding: 13 },
   errorCard: { borderLeftColor: '#FF7780' },
   warningCard: { borderLeftColor: '#FFB86B' },

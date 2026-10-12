@@ -1,5 +1,58 @@
 # Notification reliability journal
 
+## 2026-10-12 — Done opened the habit sheet; reminders after logging; stuck database
+
+**Done opened the habit sheet.** `getLastOpenedHabitId` navigated for any launch response,
+including the TAKEN action button. It now navigates only for `DEFAULT_ACTION_IDENTIFIER`
+and clears the stored response once read so it cannot replay on a later launch. Done still
+opens the app on purpose (see 2026-09-08). The action listener is now registered whatever
+the health verdict; previously a degraded verdict meant Done presses were never recorded.
+
+**Reminders still arrived after logging in the app.** The 2026-09-10 fix only covered
+follow-ups. The primary reminder is a daily trigger and cannot skip one day, so logging
+before its time still let it fire. When a habit is complete and its time is still ahead,
+the reconcile now replaces the daily trigger with dated one-offs starting tomorrow (14-day
+window, same as follow-ups); the next reconcile on a later date, or undoing the log,
+restores the daily trigger. Pending snoozes for a completed habit are cancelled, a
+foreground reminder for a completed habit is suppressed from an in-memory set (no I/O in
+the handler), and cancelled occurrences are dropped from the delivery journal so they are
+not reported as unconfirmed. Clean-up only happens once the daily goal is met.
+
+Known limit: complete a habit before its reminder and then do not open the app for 14
+days, and that habit's reminders stop until the app is next opened.
+
+**Stuck database.** On device, after one reminder-stepper tap every later SQLite call
+never settled: the stepper ignored taps, the Logs list was empty, and a Done press would
+not have been written. `getDatabase` cached the handle only after `openDatabaseAsync`
+resolved, so concurrent first callers at startup each opened a connection. It now caches
+the promise. Verified with a temporary per-statement trace to the file log: before the fix
+the hang reproduced on every launch; after it, 12 taps 0.4 s apart all registered.
+
+Debugging notes for this phone: `persist.log.tag=S` silences logcat entirely, so use
+`diagnostics.log`; and reads of that file over adb can lag the app's writes by tens of
+seconds, so wait before concluding nothing was logged.
+
+## 2026-09-10 — follow-up fired after the habit was logged
+
+The 11:15 Finasteride follow-up appeared after the 11:00 dose had already been logged
+from the app. Android confirmed that the displayed item was the repeating native alarm
+`habit-reminder-9-nag1`. The app dismissed reminders already visible in the tray, but it
+could not suppress a later native alarm while its JavaScript process was asleep.
+
+Fixed by changing follow-ups from repeating daily triggers to a rolling 14-day set of
+dated one-off triggers. Logging a habit now immediately cancels every remaining follow-up
+for that habit on the current date while leaving future dates armed. Reconciliation also
+omits today's follow-ups when the goal is already satisfied, removes legacy repeating
+follow-ups, and clears stale tray notifications for completed habits on launch. Primary
+reminders remain repeating daily alarms, so the essential reminder never depends on the
+rolling window.
+
+On-device verification: release 1.0.6 (versionCode 8) was installed over 1.0.5 with
+`ceDataInode=407360` unchanged. The app retained both habits and their history, removed
+the two legacy repeating follow-up alarms, and reported 27 of 27 live alarms: one daily
+primary plus two dated follow-ups for each of the next 13 days. No follow-up for the
+already-completed current date was armed.
+
 ## 2026-09-01 — 11:00 medication reminder investigation
 
 Reported symptom: a medication reminder expected around 11:00 appears intermittently.

@@ -19,8 +19,13 @@ export type HabbitDotBackup = {
   reminders: Array<{ id: number; habitId: number; hour: number; minute: number; enabled: boolean; label?: string | null; body?: string | null; snoozeMinutes?: number; followupMinutes?: number; followupCount?: number }>;
   settings: Array<{ key: string; value: string }>;
 };
-let database: SQLite.SQLiteDatabase | null = null;
-async function getDatabase() { if (!database) database = await SQLite.openDatabaseAsync('habbitdot.db'); return database; }
+// The promise, not the handle, is cached: two callers racing the first open would otherwise
+// each open their own connection to the same file.
+let database: Promise<SQLite.SQLiteDatabase> | null = null;
+async function getDatabase() {
+  if (!database) database = SQLite.openDatabaseAsync('habbitdot.db').catch((error) => { database = null; throw error; });
+  return database;
+}
 
 export async function initializeDatabase() {
   const db = await getDatabase();
@@ -165,6 +170,12 @@ export async function recordExpectedDelivery(entry: { reminderId: number; habitI
   await db.runAsync(`INSERT INTO reminder_deliveries(reminder_id, habit_id, occurrence_at, kind, identifier) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(reminder_id, occurrence_at, kind) DO UPDATE SET identifier = excluded.identifier`,
     entry.reminderId, entry.habitId, entry.occurrenceAt, entry.kind, entry.identifier);
+}
+
+/** Forgets occurrences in (fromIso, toIso) that were cancelled on purpose rather than lost. */
+export async function dropScheduledDeliveries(habitId: number, fromIso: string, toIso: string) {
+  const db = await getDatabase();
+  await db.runAsync("DELETE FROM reminder_deliveries WHERE habit_id = ? AND state = 'scheduled' AND occurrence_at > ? AND occurrence_at < ?", habitId, fromIso, toIso);
 }
 
 /** Resolves the single occurrence an incoming notification belongs to: the nearest one to now. */

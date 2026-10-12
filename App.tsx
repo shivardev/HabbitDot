@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, FlatList, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { addDiagnosticLog, addHabit, createBackup, decrementEntry, getHabits, getSetting, Habit, HabitType, initializeDatabase, parseBackup, REMINDER_DEFAULTS, replaceHabitReminders, restoreBackup, setSetting, toggleEntry, updateDailyGoal, updateHabit, updatePrimaryReminder } from './src/database';
-import { configureNotifications, dismissRemindersFor, getLastOpenedHabitId, getMissedToday, listenForNotificationActions, NotificationHealth, notifyMissedReminders, scheduleDeliveryVerification } from './src/notifications';
+import { configureNotifications, getLastOpenedHabitId, getMissedToday, listenForNotificationActions, NotificationHealth, NotificationIssue, notifyMissedReminders, scheduleDeliveryVerification, settleRemindersFor } from './src/notifications';
 import { MissedTodayBanner, ReminderHealthBanner } from './src/ReminderBanners';
 import { openBatteryOptimizationSettings, openExactAlarmSettings, openNotificationSettings } from './modules/habbitdot-reliability';
 import { AnalyticsScreen } from './src/AnalyticsScreen';
@@ -63,6 +63,7 @@ function HabitCard({ habit, onDecrement, onToggle, onOpen }: { habit: Habit; onD
   const todayRatio = habit.habitType === 'unlimited' ? 1 - Math.exp(-todayCount / 3) : todayCount / Math.max(1, habit.dailyGoal);
   const completed = new Set(habit.completedDates);
   const total = habit.completedDates.length;
+  const todayWeekday = (new Date().getDay() + 6) % 7;
 
   return (
     <View style={styles.card}>
@@ -85,14 +86,14 @@ function HabitCard({ habit, onDecrement, onToggle, onOpen }: { habit: Habit; onD
       </View>
 
       <View style={styles.historyRow}>
-        <View style={styles.weekdayLabels}>{WEEKDAYS.map((day, index) => <Text key={`${day}-${index}`} style={styles.weekday}>{day}</Text>)}</View>
+        <View style={styles.weekdayLabels}>{WEEKDAYS.map((day, index) => <Text key={`${day}-${index}`} style={[styles.weekday, index === todayWeekday && styles.weekdayToday]}>{day}</Text>)}</View>
         <View style={styles.weeks}>
           {weeks.map((week, weekIndex) => (
             <View key={weekIndex} style={styles.weekColumn}>
               {week.map((day) => {
                 const count = habit.completionCounts[day.key] ?? 0;
                 const done = completed.has(day.key);
-                return <Pressable key={day.key} accessibilityLabel={`Open ${habit.name} history at ${day.key}, ${count}${habit.habitType === 'unlimited' ? ' logs' : ` of ${habit.dailyGoal}`}`} disabled={day.future} onPress={() => onOpen(habit)} style={({ pressed }) => [styles.historyDot, { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited') }, day.future && styles.futureDot, pressed && styles.pressed]}>{habit.habitType === 'unlimited' && !day.future && <Text style={[styles.historyDotCount, { color: count >= 3 ? '#111114' : '#F4F4F2' }]}>{unlimitedDotLabel(count)}</Text>}</Pressable>;
+                return <Pressable key={day.key} accessibilityLabel={`Open ${habit.name} history at ${day.key === today ? 'today' : day.key}, ${count}${habit.habitType === 'unlimited' ? ' logs' : ` of ${habit.dailyGoal}`}`} disabled={day.future} onPress={() => onOpen(habit)} style={({ pressed }) => [styles.historyDot, { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited') }, day.future && styles.futureDot, day.key === today && styles.todayDot, pressed && styles.pressed]}>{habit.habitType === 'unlimited' && !day.future && <Text style={[styles.historyDotCount, { color: count >= 3 ? '#111114' : '#F4F4F2' }]}>{unlimitedDotLabel(count)}</Text>}</Pressable>;
               })}
             </View>
           ))}
@@ -119,7 +120,8 @@ function HabitDetail({ habit, month, onChangeMonth, onClose, onDecrement, onEdit
   const weeks = useMemo(() => historyWeeks(), []);
   const suppressPress = useRef(false);
   const days = useMemo(() => calendarDays(month), [month]);
-  const completed = new Set(habit.completedDates);
+  const today = dateKey(new Date());
+  const todayWeekday = (new Date().getDay() + 6) % 7;
   const reminderMinutes = (habit.reminderHour ?? 20) * 60 + (habit.reminderMinute ?? 0);
   const reminderLabel = new Date(2000, 0, 1, habit.reminderHour ?? 20, habit.reminderMinute ?? 0).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   const shiftReminder = (offset: number) => { const next = (reminderMinutes + offset + 1440) % 1440; onReminder(Math.floor(next / 60), next % 60, habit.reminderEnabled); };
@@ -141,7 +143,7 @@ function HabitDetail({ habit, month, onChangeMonth, onClose, onDecrement, onEdit
             <View style={styles.settingLine}><Pressable onPress={() => onReminder(habit.reminderHour ?? 20, habit.reminderMinute ?? 0, !habit.reminderEnabled)}><Text style={styles.settingTitle}>REMINDER {habit.reminderEnabled ? 'ON' : 'OFF'}</Text><Text style={styles.settingHint}>Tap label to toggle</Text></Pressable><View style={styles.stepper}><Pressable onPress={() => shiftReminder(-15)} style={styles.stepButton}><Text style={styles.stepText}>‹</Text></Pressable><Text style={styles.reminderTime}>{reminderLabel}</Text><Pressable onPress={() => shiftReminder(15)} style={styles.stepButton}><Text style={styles.stepText}>›</Text></Pressable></View></View>
           </View>
           <View style={styles.overviewBox}>
-            <View style={styles.historyRow}><View style={styles.weekdayLabels}>{WEEKDAYS.map((day, index) => <Text key={`${day}-${index}`} style={styles.weekday}>{day}</Text>)}</View><View style={styles.weeks}>{weeks.map((week, weekIndex) => <View key={weekIndex} style={styles.weekColumn}>{week.map((day) => { const count = habit.completionCounts[day.key] ?? 0; return <View key={day.key} style={[styles.historyDot, { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited') }, day.future && styles.futureDot]}>{habit.habitType === 'unlimited' && !day.future && <Text style={[styles.historyDotCount, { color: count >= 3 ? '#111114' : '#F4F4F2' }]}>{unlimitedDotLabel(count)}</Text>}</View>; })}</View>)}</View></View>
+            <View style={styles.historyRow}><View style={styles.weekdayLabels}>{WEEKDAYS.map((day, index) => <Text key={`${day}-${index}`} style={[styles.weekday, index === todayWeekday && styles.weekdayToday]}>{day}</Text>)}</View><View style={styles.weeks}>{weeks.map((week, weekIndex) => <View key={weekIndex} style={styles.weekColumn}>{week.map((day) => { const count = habit.completionCounts[day.key] ?? 0; return <View key={day.key} style={[styles.historyDot, { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited') }, day.future && styles.futureDot, day.key === today && styles.todayDot]}>{habit.habitType === 'unlimited' && !day.future && <Text style={[styles.historyDotCount, { color: count >= 3 ? '#111114' : '#F4F4F2' }]}>{unlimitedDotLabel(count)}</Text>}</View>; })}</View>)}</View></View>
             <View style={styles.monthLabels}><Text style={styles.monthLabel}>MAR</Text><Text style={styles.monthLabel}>APR</Text><Text style={styles.monthLabel}>MAY</Text><Text style={styles.monthLabel}>JUN</Text><Text style={styles.monthLabel}>JUL</Text><Text style={styles.monthLabel}>AUG</Text></View>
           </View>
 
@@ -150,7 +152,7 @@ function HabitDetail({ habit, month, onChangeMonth, onClose, onDecrement, onEdit
             <View style={styles.calendarGrid}>{days.map((day) => {
               const count = habit.completionCounts[day.key] ?? 0;
               const bright = habit.habitType === 'unlimited' ? count >= 3 : count >= habit.dailyGoal;
-              return <Pressable key={day.key} accessibilityHint={habit.habitType === 'unlimited' ? 'Long press to undo one log' : undefined} accessibilityLabel={`${habit.name}, ${day.key}, ${count}${habit.habitType === 'unlimited' ? ' logs' : ` of ${habit.dailyGoal}`}`} disabled={!day.inMonth || day.future} onLongPress={habit.habitType === 'unlimited' && count > 0 ? () => { suppressPress.current = true; onDecrement(habit.id, day.key); } : undefined} onPress={() => { if (suppressPress.current) { suppressPress.current = false; return; } onToggle(habit.id, day.key); }} style={({ pressed }) => [styles.calendarCell, !day.inMonth && styles.calendarOutside, count > 0 && { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited'), borderColor: habit.color }, pressed && styles.pressed]}><Text style={[styles.calendarDay, count > 0 && { color: bright ? '#111114' : '#F4F4F2' }]}>{day.day}</Text><Text style={[styles.calendarState, count > 0 && { color: bright ? '#111114' : '#F4F4F2' }]}>{count}/{habit.habitType === 'unlimited' ? '∞' : habit.dailyGoal}</Text></Pressable>;
+              return <Pressable key={day.key} accessibilityHint={habit.habitType === 'unlimited' ? 'Long press to undo one log' : undefined} accessibilityLabel={`${habit.name}, ${day.key === today ? 'today' : day.key}, ${count}${habit.habitType === 'unlimited' ? ' logs' : ` of ${habit.dailyGoal}`}`} disabled={!day.inMonth || day.future} onLongPress={habit.habitType === 'unlimited' && count > 0 ? () => { suppressPress.current = true; onDecrement(habit.id, day.key); } : undefined} onPress={() => { if (suppressPress.current) { suppressPress.current = false; return; } onToggle(habit.id, day.key); }} style={({ pressed }) => [styles.calendarCell, !day.inMonth && styles.calendarOutside, count > 0 && { backgroundColor: progressColor(habit.color, count, habit.dailyGoal, habit.habitType === 'unlimited'), borderColor: habit.color }, day.key === today && styles.calendarToday, pressed && styles.pressed]}>{day.key === today && <Text style={[styles.calendarTodayTag, count > 0 && bright && { color: '#111114' }]}>TODAY</Text>}<Text style={[styles.calendarDay, count > 0 && { color: bright ? '#111114' : '#F4F4F2' }]}>{day.day}</Text><Text style={[styles.calendarState, count > 0 && { color: bright ? '#111114' : '#F4F4F2' }]}>{count}/{habit.habitType === 'unlimited' ? '∞' : habit.dailyGoal}</Text></Pressable>;
             })}</View>
           </View>
           <View style={styles.monthControls}><Pressable accessibilityLabel="Previous month" onPress={() => onChangeMonth(-1)} style={styles.monthArrow}><Text style={styles.monthArrowText}>‹</Text></Pressable><View style={styles.monthName}><Text style={styles.monthNameText}>{month.toLocaleDateString(undefined, { month: 'long' }).toUpperCase()}</Text></View><View style={styles.yearBox}><Text style={styles.monthNameText}>{month.getFullYear()}</Text></View><Pressable accessibilityLabel="Next month" onPress={() => onChangeMonth(1)} style={styles.monthArrow}><Text style={styles.monthArrowText}>›</Text></Pressable></View>
@@ -263,6 +265,15 @@ export default function App() {
   const [viewedMonth, setViewedMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [health, setHealth] = useState<NotificationHealth | null>(null);
   const [missed, setMissed] = useState<Awaited<ReturnType<typeof getMissedToday>>>([]);
+  const [dismissedWarnings, setDismissedWarnings] = useState<NotificationIssue[]>([]);
+  const dismissWarning = useCallback((issue: NotificationIssue) => {
+    setDismissedWarnings((current) => {
+      const next = current.includes(issue) ? current : [...current, issue];
+      // Only a standing condition is remembered; a one-off repair notice should show again next time.
+      setSetting('dismissed_reminder_warnings', JSON.stringify(next.filter((item) => item === 'battery-optimized'))).catch(console.error);
+      return next;
+    });
+  }, []);
   const refresh = useCallback(async () => { setHabits(await getHabits()); setMissed(await getMissedToday()); }, []);
 
   /**
@@ -328,12 +339,15 @@ export default function App() {
     initializeDatabase().then(async () => {
       await addDiagnosticLog('info', 'app.started', 'HabbitDot initialized and began its notification health check.', { appState: AppState.currentState });
       await refresh();
+      try { setDismissedWarnings(JSON.parse(await getSetting('dismissed_reminder_warnings') ?? '[]')); } catch { setDismissedWarnings([]); }
       const notificationHealth = await runSync(true);
       await showNotificationProblem(notificationHealth);
+      // Listen even when reminder health is degraded: a Done press must still be recorded,
+      // and Expo holds launch responses until the first listener subscribes.
+      notificationSubscription = (await listenForNotificationActions(() => { refresh().catch(console.error); scheduleSync(); }, setSelectedHabitId)) ?? undefined;
+      const openedHabitId = getLastOpenedHabitId();
+      if (openedHabitId) setSelectedHabitId(openedHabitId);
       if (notificationHealth.ready) {
-        notificationSubscription = (await listenForNotificationActions(refresh, setSelectedHabitId)) ?? undefined;
-        const openedHabitId = await getLastOpenedHabitId();
-        if (openedHabitId) setSelectedHabitId(openedHabitId);
         if (await getSetting('notification_delivery_check') !== '2') {
           await scheduleDeliveryVerification();
           await setSetting('notification_delivery_check', '2');
@@ -341,7 +355,7 @@ export default function App() {
       }
     }).catch((error) => Alert.alert('Could not initialize HabbitDot', String(error))).finally(() => setLoading(false));
     return () => notificationSubscription?.remove();
-  }, [refresh, runSync, showNotificationProblem]);
+  }, [refresh, runSync, scheduleSync, showNotificationProblem]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
@@ -358,8 +372,8 @@ export default function App() {
     setName(''); setAdding(false); await refresh();
   }
 
-  async function markDay(habitId: number, date: string) { await toggleEntry(habitId, date); await refresh(); if (date === dateKey(new Date())) { await dismissRemindersFor(habitId); scheduleSync(); } }
-  async function undoDay(habitId: number, date: string) { await decrementEntry(habitId, date); await refresh(); if (date === dateKey(new Date())) scheduleSync(); }
+  async function markDay(habitId: number, date: string) { await toggleEntry(habitId, date); await refresh(); if (date === dateKey(new Date())) { await settleRemindersFor(habitId); scheduleSync(); } }
+  async function undoDay(habitId: number, date: string) { await decrementEntry(habitId, date); await refresh(); if (date === dateKey(new Date())) { await settleRemindersFor(habitId); scheduleSync(); } }
   async function changeGoal(habitId: number, goal: number) { await updateDailyGoal(habitId, goal); await refresh(); scheduleSync(); }
   async function changeReminder(habitId: number, hour: number, minute: number, enabled: boolean) { await updatePrimaryReminder(habitId, hour, minute, enabled); await refresh(); scheduleSync(); }
   async function saveHabitEdits(habitId: number, nextName: string, color: string, goal: number, habitType: HabitType, reminders: EditableReminder[]) {
@@ -432,7 +446,7 @@ export default function App() {
           {adding && <View style={styles.composer}><TextInput autoFocus onChangeText={setName} onSubmitEditing={createHabit} placeholder="NAME YOUR HABIT" placeholderTextColor="#77777E" returnKeyType="done" style={styles.input} value={name} /><Pressable disabled={!name.trim()} onPress={createHabit} style={[styles.saveButton, !name.trim() && styles.disabled]}><Text style={styles.saveText}>SAVE</Text></Pressable></View>}
 
           {!loading && <View style={styles.banners}>
-            <ReminderHealthBanner health={health} onOpenLogs={() => { setAdding(false); setActiveScreen('logs'); }} />
+            <ReminderHealthBanner dismissed={dismissedWarnings} health={health} onDismiss={dismissWarning} onOpenLogs={() => { setAdding(false); setActiveScreen('logs'); }} />
             <MissedTodayBanner missed={missed} onLog={(habitId) => markDay(habitId, dateKey(new Date()))} />
           </View>}
 
@@ -474,14 +488,14 @@ const styles = StyleSheet.create({
   header: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 9 }, brand: { color: '#F4F4F2', fontFamily: 'monospace', fontSize: 18, fontWeight: '900', letterSpacing: 2 }, brandAccent: { color: '#B7F171' }, tagline: { color: '#67676E', fontFamily: 'monospace', fontSize: 6, fontWeight: '800', letterSpacing: 1.5, marginTop: 2 }, headerButton: { alignItems: 'center', backgroundColor: '#ECECEA', borderRadius: 9, height: 34, justifyContent: 'center', width: 38 }, headerButtonText: { color: '#101012', fontFamily: 'monospace', fontSize: 21, fontWeight: '400', marginTop: -2 },
   contextBar: { alignItems: 'center', borderBottomColor: '#202024', borderBottomWidth: 1, borderTopColor: '#202024', borderTopWidth: 1, flexDirection: 'row', gap: 10, marginBottom: 4, paddingHorizontal: 16, paddingVertical: 8 }, contextEyebrow: { color: '#66666D', fontFamily: 'monospace', fontSize: 5, fontWeight: '900', letterSpacing: 1.3 }, contextDate: { color: '#E8E8E6', fontFamily: 'monospace', fontSize: 8, fontWeight: '900', letterSpacing: 0.8, marginTop: 1 }, contextRule: { backgroundColor: '#2A2A2E', flex: 1, height: 1 }, contextCount: { color: '#77777E', fontFamily: 'monospace', fontSize: 6, fontWeight: '900', letterSpacing: 0.8 },
   composer: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, flexDirection: 'row', marginBottom: 5, marginHorizontal: 14, padding: 4 }, input: { color: '#F4F4F2', flex: 1, fontSize: 11, fontWeight: '700', letterSpacing: 0.4, paddingHorizontal: 10 }, saveButton: { backgroundColor: '#B7F171', borderRadius: 8, justifyContent: 'center', paddingHorizontal: 13, paddingVertical: 8 }, saveText: { color: '#101012', fontSize: 9, fontWeight: '900' }, disabled: { opacity: 0.35 }, pressed: { opacity: 0.65, transform: [{ scale: 0.97 }] }, loader: { marginTop: 60 }, list: { flexGrow: 1, paddingBottom: 18, paddingHorizontal: 14, paddingTop: 5 },
-  card: { backgroundColor: '#101012', borderColor: '#29292E', borderRadius: 10, borderWidth: 1, marginBottom: 8, padding: 9 }, cardHeader: { alignItems: 'center', flexDirection: 'row', marginBottom: 7 }, habitIcon: { alignItems: 'center', borderRadius: 8, height: 34, justifyContent: 'center', width: 38 }, iconDot: { borderRadius: 7, borderWidth: 2, height: 14, width: 14 }, habitIdentity: { flex: 1, marginLeft: 9 }, habitName: { color: '#F1F1EF', fontFamily: 'monospace', fontSize: 12, fontWeight: '900', letterSpacing: 0.9 }, habitMeta: { color: '#6E6E75', fontFamily: 'monospace', fontSize: 6, fontWeight: '800', letterSpacing: 1.1, marginTop: 2 }, todayButton: { alignItems: 'center', borderRadius: 8, borderWidth: 1, height: 34, justifyContent: 'center', width: 43 }, todayCheck: { fontFamily: 'monospace', fontSize: 14, fontWeight: '900' }, todayCheckActive: { fontSize: 15 }, statsStrip: { borderRadius: 4, flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8, paddingHorizontal: 7, paddingVertical: 4 }, statText: { color: '#E3E3E1', fontFamily: 'monospace', fontSize: 6, fontWeight: '900', letterSpacing: 0.3 }, historyRow: { flexDirection: 'row' }, weekdayLabels: { gap: 2, marginRight: 5 }, weekday: { color: '#707077', fontFamily: 'monospace', fontSize: 6, fontWeight: '800', height: 9, lineHeight: 9, textAlign: 'center', width: 8 }, weeks: { flex: 1, flexDirection: 'row', justifyContent: 'space-between' }, weekColumn: { gap: 2 }, historyDot: { alignItems: 'center', borderRadius: 5, height: 9, justifyContent: 'center', width: 9 }, historyDotCount: { fontFamily: 'monospace', fontSize: 5, fontWeight: '900', lineHeight: 7, textAlign: 'center' }, futureDot: { backgroundColor: '#1D1D21', opacity: 0.65 }, monthLabels: { flexDirection: 'row', justifyContent: 'space-around', marginLeft: 13, marginTop: 5 }, monthLabel: { color: '#5F5F66', fontFamily: 'monospace', fontSize: 5, fontWeight: '800', letterSpacing: 0.7 },
+  card: { backgroundColor: '#101012', borderColor: '#29292E', borderRadius: 10, borderWidth: 1, marginBottom: 8, padding: 9 }, cardHeader: { alignItems: 'center', flexDirection: 'row', marginBottom: 7 }, habitIcon: { alignItems: 'center', borderRadius: 8, height: 34, justifyContent: 'center', width: 38 }, iconDot: { borderRadius: 7, borderWidth: 2, height: 14, width: 14 }, habitIdentity: { flex: 1, marginLeft: 9 }, habitName: { color: '#F1F1EF', fontFamily: 'monospace', fontSize: 12, fontWeight: '900', letterSpacing: 0.9 }, habitMeta: { color: '#6E6E75', fontFamily: 'monospace', fontSize: 6, fontWeight: '800', letterSpacing: 1.1, marginTop: 2 }, todayButton: { alignItems: 'center', borderRadius: 8, borderWidth: 1, height: 34, justifyContent: 'center', width: 43 }, todayCheck: { fontFamily: 'monospace', fontSize: 14, fontWeight: '900' }, todayCheckActive: { fontSize: 15 }, statsStrip: { borderRadius: 4, flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8, paddingHorizontal: 7, paddingVertical: 4 }, statText: { color: '#E3E3E1', fontFamily: 'monospace', fontSize: 6, fontWeight: '900', letterSpacing: 0.3 }, historyRow: { flexDirection: 'row' }, weekdayLabels: { gap: 2, marginRight: 5 }, weekday: { color: '#707077', fontFamily: 'monospace', fontSize: 6, fontWeight: '800', height: 9, lineHeight: 9, textAlign: 'center', width: 8 }, weeks: { flex: 1, flexDirection: 'row', justifyContent: 'space-between' }, weekColumn: { gap: 2 }, historyDot: { alignItems: 'center', borderRadius: 5, height: 9, justifyContent: 'center', width: 9 }, historyDotCount: { fontFamily: 'monospace', fontSize: 5, fontWeight: '900', lineHeight: 7, textAlign: 'center' }, futureDot: { backgroundColor: '#1D1D21', opacity: 0.65 }, todayDot: { outlineColor: '#F4F4F2', outlineOffset: 0.5, outlineStyle: 'solid', outlineWidth: 1.5 }, weekdayToday: { color: '#F4F4F2', fontWeight: '900' }, monthLabels: { flexDirection: 'row', justifyContent: 'space-around', marginLeft: 13, marginTop: 5 }, monthLabel: { color: '#5F5F66', fontFamily: 'monospace', fontSize: 5, fontWeight: '800', letterSpacing: 0.7 },
   empty: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 48, paddingTop: 120 }, emptyOrbit: { alignItems: 'center', borderColor: '#B7F171', borderRadius: 36, borderWidth: 2, height: 72, justifyContent: 'center', width: 72 }, emptyCenter: { backgroundColor: '#B7F171', borderRadius: 8, height: 16, width: 16 }, emptyTitle: { color: '#F4F4F2', fontSize: 18, fontWeight: '900', letterSpacing: 1, marginTop: 22 }, emptyBody: { color: '#85858C', fontSize: 13, lineHeight: 20, marginTop: 8, textAlign: 'center' },
   bottomNav: { backgroundColor: '#111114', borderTopColor: '#242428', borderTopWidth: 1, bottom: 0, flexDirection: 'row', left: 0, paddingBottom: 8, paddingTop: 8, position: 'absolute', right: 0 }, navItem: { alignItems: 'center', flex: 1 }, navIcon: { color: '#68686F', fontSize: 13, height: 17 }, navLabel: { color: '#68686F', fontFamily: 'monospace', fontSize: 5, fontWeight: '900', letterSpacing: 0.7, marginTop: 2 }, navActive: { color: '#B7F171' },
   backupScreen: { flexGrow: 1, paddingBottom: 110, paddingHorizontal: 20, paddingTop: 34 }, backupEyebrow: { color: '#B7F171', fontFamily: 'monospace', fontSize: 8, fontWeight: '900', letterSpacing: 1.5 }, backupTitle: { color: '#F4F4F2', fontSize: 25, fontWeight: '900', letterSpacing: 1, marginTop: 7 }, backupBody: { color: '#929299', fontSize: 13, lineHeight: 20, marginTop: 12 }, backupPrimary: { backgroundColor: '#B7F171', borderRadius: 13, marginTop: 28, minHeight: 76, paddingHorizontal: 18, paddingVertical: 16 }, backupPrimaryTitle: { color: '#101012', fontSize: 13, fontWeight: '900', letterSpacing: 1 }, backupPrimaryHint: { color: '#344124', fontSize: 9, fontWeight: '700', marginTop: 5 }, backupDivider: { backgroundColor: '#2B2B30', height: 1, marginVertical: 30 }, backupWarningTitle: { color: '#F4F4F2', fontSize: 12, fontWeight: '900', letterSpacing: 1 }, backupWarning: { color: '#85858C', fontSize: 11, lineHeight: 18, marginTop: 9 }, backupSecondary: { alignItems: 'center', borderColor: '#55555C', borderRadius: 12, borderWidth: 1, marginTop: 20, paddingVertical: 17 }, backupSecondaryText: { color: '#F4F4F2', fontSize: 10, fontWeight: '900', letterSpacing: 0.8 },
   modalBackdrop: { backgroundColor: 'rgba(0,0,0,0.72)', flex: 1, justifyContent: 'flex-end' }, detailSheet: { backgroundColor: '#0B0B0D', borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '90%' }, detailContent: { padding: 14, paddingBottom: 22 },
   detailHeader: { alignItems: 'center', flexDirection: 'row', marginBottom: 10 }, detailIcon: { alignItems: 'center', borderRadius: 10, height: 44, justifyContent: 'center', width: 48 }, detailName: { color: '#F4F4F2', fontSize: 17, fontWeight: '900', letterSpacing: 0.8 }, editButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 10, height: 40, justifyContent: 'center', marginRight: 6, width: 44 }, editButtonText: { color: '#F4F4F2', fontSize: 21 }, closeButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 10, height: 40, justifyContent: 'center', width: 44 }, closeText: { color: '#F4F4F2', fontSize: 25, lineHeight: 27 },
   overviewBox: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, marginBottom: 12, padding: 9 }, calendarBox: { borderColor: '#303036', borderRadius: 11, borderWidth: 1, padding: 8 }, calendarWeek: { flexDirection: 'row', marginBottom: 6 }, calendarWeekday: { color: '#77777E', flex: 1, fontSize: 8, fontWeight: '900', textAlign: 'center' }, calendarGrid: { flexDirection: 'row', flexWrap: 'wrap' },
-  calendarCell: { alignItems: 'center', borderColor: '#29292E', borderRadius: 7, borderWidth: 1, height: 47, justifyContent: 'center', margin: '0.5%', width: '13.28%' }, calendarOutside: { borderColor: 'transparent', opacity: 0.16 }, calendarDay: { color: '#E6E6E4', fontSize: 12, fontWeight: '900' }, calendarState: { color: '#626269', fontSize: 5, fontWeight: '900', letterSpacing: 0.3, marginTop: 2 },
+  calendarCell: { alignItems: 'center', borderColor: '#29292E', borderRadius: 7, borderWidth: 1, height: 47, justifyContent: 'center', margin: '0.5%', width: '13.28%' }, calendarOutside: { borderColor: 'transparent', opacity: 0.16 }, calendarToday: { borderColor: '#F4F4F2', borderWidth: 2 }, calendarTodayTag: { color: '#F4F4F2', fontSize: 5, fontWeight: '900', left: 0, letterSpacing: 0.6, position: 'absolute', right: 0, textAlign: 'center', top: 3 }, calendarDay: { color: '#E6E6E4', fontSize: 12, fontWeight: '900' }, calendarState: { color: '#626269', fontSize: 5, fontWeight: '900', letterSpacing: 0.3, marginTop: 2 },
   monthControls: { flexDirection: 'row', gap: 7, marginTop: 11 }, monthArrow: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 9, height: 42, justifyContent: 'center', width: 46 }, monthArrowText: { color: '#F4F4F2', fontSize: 25 }, monthName: { alignItems: 'center', borderColor: '#303036', borderRadius: 9, borderWidth: 1, flex: 1, justifyContent: 'center' }, yearBox: { alignItems: 'center', borderColor: '#303036', borderRadius: 9, borderWidth: 1, justifyContent: 'center', width: 65 }, monthNameText: { color: '#F4F4F2', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   reminderSettings: { borderColor: '#303036', borderRadius: 10, borderWidth: 1, marginBottom: 12, paddingHorizontal: 10 }, settingLine: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', minHeight: 54 }, settingTitle: { color: '#F4F4F2', fontSize: 9, fontWeight: '900', letterSpacing: 0.7 }, settingHint: { color: '#6F6F76', fontSize: 7, marginTop: 3 }, settingDivider: { backgroundColor: '#29292E', height: 1 }, stepper: { alignItems: 'center', flexDirection: 'row', gap: 7 }, stepButton: { alignItems: 'center', backgroundColor: '#202024', borderRadius: 7, height: 30, justifyContent: 'center', width: 30 }, stepText: { color: '#F4F4F2', fontSize: 17, fontWeight: '700' }, stepValue: { color: '#B7F171', fontSize: 12, fontWeight: '900', minWidth: 28, textAlign: 'center' }, reminderTime: { color: '#B7F171', fontSize: 9, fontWeight: '900', minWidth: 62, textAlign: 'center' },
   banners: { paddingHorizontal: 14 },

@@ -4,6 +4,7 @@ import { Platform } from 'react-native';
 import {
   addDiagnosticLog,
   type DeliveryKind,
+  dropScheduledDeliveries,
   type EnabledReminder,
   getCatchupClaim,
   getEnabledReminders,
@@ -58,7 +59,7 @@ export type NotificationHealth = {
  */
 const ISSUE_SEVERITY: NotificationIssue[] = ['permission-denied', 'channel-disabled', 'exact-alarms-blocked', 'alarms-missing', 'scheduling-failed', 'alarms-repaired', 'battery-optimized'];
 
-const isReminderNotification = (data: unknown): data is { kind: string; reminderId?: number; habitId?: number; deliveryKind?: DeliveryKind } =>
+const isReminderNotification = (data: unknown): data is { kind: string; reminderId?: number; habitId?: number; deliveryKind?: DeliveryKind; occurrenceDate?: string } =>
   typeof data === 'object' && data !== null && typeof (data as { kind?: unknown }).kind === 'string' && (data as { kind: string }).kind.startsWith('habbitdot-');
 
 const localDateKey = (date = new Date()) =>
@@ -79,7 +80,11 @@ function nextDailyOccurrence(hour: number, minute: number) {
 }
 
 const primaryId = (reminderId: number) => `habit-reminder-${reminderId}`;
-const followupId = (reminderId: number, index: number) => `habit-reminder-${reminderId}-nag${index}`;
+const datedPrimaryId = (reminderId: number, date: Date) => `habit-reminder-${reminderId}-${localDateKey(date)}`;
+/** How far ahead dated one-off alarms are armed. Every reconcile tops the window back up. */
+const ROLLING_HORIZON_DAYS = 14;
+const followupId = (reminderId: number, index: number, date: Date) =>
+  `habit-reminder-${reminderId}-nag${index}-${localDateKey(date)}`;
 
 /**
  * Whether a reminder still needs the user's attention today. Follow-up nags are
@@ -94,6 +99,20 @@ async function alreadyLogged(habitId: number) {
   return match ? isSatisfied(match) : false;
 }
 
+/**
+ * Habits already complete today, held in memory so the foreground handler can consult it
+ * without I/O. Keyed by date: a set left over from yesterday answers "not satisfied", which
+ * errs on the side of showing the reminder.
+ */
+let satisfiedToday: { date: string; habitIds: Set<number> } = { date: '', habitIds: new Set() };
+const isKnownSatisfied = (habitId: unknown) => satisfiedToday.date === localDateKey() && satisfiedToday.habitIds.has(Number(habitId));
+function rememberSatisfaction(habitId: number, satisfied: boolean) {
+  const today = localDateKey();
+  if (satisfiedToday.date !== today) satisfiedToday = { date: today, habitIds: new Set() };
+  if (satisfied) satisfiedToday.habitIds.add(habitId);
+  else satisfiedToday.habitIds.delete(habitId);
+}
+
 // Expo discards a foreground notification when no handler is registered within
 // three seconds. Register it as soon as this module loads.
 if (!isExpoGo) {
@@ -103,6 +122,11 @@ if (!isExpoGo) {
     // traded for a database read. Redundant reminders are cleared by the received
     // listener instead, a moment later and with no deadline attached.
     handleNotification: async (notification) => {
+      const data = notification.request.content.data;
+      if (isReminderNotification(data) && isKnownSatisfied(data.habitId)) {
+        addDiagnosticLog('info', 'presentation.suppressed', 'Habit already complete today; foreground reminder not shown.', { identifier: notification.request.identifier }).catch(console.error);
+        return { shouldPlaySound: false, shouldSetBadge: false, shouldShowBanner: false, shouldShowList: false };
+      }
       appendFileLog(`${new Date().toISOString()} [info] presentation.allowed ${notification.request.identifier}`);
       addDiagnosticLog('info', 'presentation.allowed', 'Foreground presentation handler allowed the notification.', { identifier: notification.request.identifier, title: notification.request.content.title }).catch(console.error);
       return { shouldPlaySound: true, shouldSetBadge: false, shouldShowBanner: true, shouldShowList: true };
@@ -143,22 +167,47 @@ async function ensureChannelAndCategory() {
   ]);
 }
 
-type PlannedNotification = { identifier: string; reminder: EnabledReminder; deliveryKind: Exclude<DeliveryKind, 'snooze' | 'catchup'>; hour: number; minute: number };
+type PlannedNotification = {
+  identifier: string;
+  reminder: EnabledReminder;
+  deliveryKind: Exclude<DeliveryKind, 'snooze' | 'catchup'>;
+  hour: number;
+  minute: number;
+  fireAt?: Date;
+};
 
 /**
- * Every notification the app wants Android to own, primary reminders and follow-up nags
- * alike. Follow-ups that would spill past midnight are dropped rather than wrapped round
- * to the small hours of the same day.
+ * Primary reminders repeat forever. Follow-ups are dated one-offs so completing a habit
+ * can cancel the rest of today's nags without also removing tomorrow's. A rolling window
+ * keeps the alarm count bounded and is replenished whenever the app opens.
+ *
+ * A daily trigger cannot skip a single day, so a habit completed before its reminder time
+ * trades the daily alarm for dated one-offs starting tomorrow. The next reconcile on a
+ * later date, or undoing today's log, brings the daily alarm back.
  */
 function planNotifications(reminders: EnabledReminder[]): PlannedNotification[] {
   const planned: PlannedNotification[] = [];
   for (const reminder of reminders) {
-    planned.push({ identifier: primaryId(reminder.id), reminder, deliveryKind: 'primary', hour: reminder.hour, minute: reminder.minute });
+    if (isSatisfied(reminder) && occurrenceAt(reminder.hour, reminder.minute).getTime() > Date.now()) {
+      for (let dayOffset = 1; dayOffset < ROLLING_HORIZON_DAYS; dayOffset += 1) {
+        const fireAt = occurrenceAt(reminder.hour, reminder.minute, dayOffset);
+        planned.push({ identifier: datedPrimaryId(reminder.id, fireAt), reminder, deliveryKind: 'primary', hour: reminder.hour, minute: reminder.minute, fireAt });
+      }
+    } else {
+      planned.push({ identifier: primaryId(reminder.id), reminder, deliveryKind: 'primary', hour: reminder.hour, minute: reminder.minute });
+    }
     const base = reminder.hour * 60 + reminder.minute;
     for (let index = 1; index <= reminder.followupCount; index += 1) {
       const at = base + index * reminder.followupMinutes;
       if (at >= 24 * 60) break;
-      planned.push({ identifier: followupId(reminder.id, index), reminder, deliveryKind: 'followup', hour: Math.floor(at / 60), minute: at % 60 });
+      const hour = Math.floor(at / 60);
+      const minute = at % 60;
+      for (let dayOffset = 0; dayOffset < ROLLING_HORIZON_DAYS; dayOffset += 1) {
+        const fireAt = occurrenceAt(hour, minute, dayOffset);
+        if (fireAt.getTime() <= Date.now()) continue;
+        if (dayOffset === 0 && isSatisfied(reminder)) continue;
+        planned.push({ identifier: followupId(reminder.id, index, fireAt), reminder, deliveryKind: 'followup', hour, minute, fireAt });
+      }
     }
   }
   return planned;
@@ -178,7 +227,7 @@ function contentFor(plan: PlannedNotification) {
     title: plan.deliveryKind === 'followup' ? `${title} — reminder` : title,
     body,
     categoryIdentifier: CATEGORY_ID,
-    data: { kind: REMINDER_KIND, deliveryKind: plan.deliveryKind, reminderId: reminder.id, habitId: reminder.habitId },
+    data: { kind: REMINDER_KIND, deliveryKind: plan.deliveryKind, reminderId: reminder.id, habitId: reminder.habitId, occurrenceDate: plan.fireAt ? localDateKey(plan.fireAt) : undefined },
     sound: 'default' as const,
     color: ACCENT_COLOR,
     priority: Notifications.AndroidNotificationPriority.MAX,
@@ -229,6 +278,17 @@ export async function configureNotifications(requestPermission = true): Promise<
 
   const reminders = await getEnabledReminders(localDateKey());
   const plans = planNotifications(reminders);
+  const satisfiedHabitIds = new Set(reminders.filter(isSatisfied).map((reminder) => reminder.habitId));
+  satisfiedToday = { date: localDateKey(), habitIds: satisfiedHabitIds };
+  if (satisfiedHabitIds.size > 0) {
+    for (const item of await withTimeout(Notifications.getPresentedNotificationsAsync(), [], 'getPresentedNotificationsAsync (clear satisfied)')) {
+      const data = item.request.content.data;
+      if (isReminderNotification(data) && satisfiedHabitIds.has(Number(data.habitId))) {
+        await Notifications.dismissNotificationAsync(item.request.identifier);
+      }
+    }
+    for (const habitId of satisfiedHabitIds) await forgetRemainingOccurrencesToday(habitId);
+  }
   const scheduledBefore = await withTimeout(Notifications.getAllScheduledNotificationsAsync(), [], 'getAllScheduledNotificationsAsync');
   const desiredIds = new Set(plans.map((plan) => plan.identifier));
   const storedDesiredIds = scheduledBefore.filter((item) => desiredIds.has(item.identifier)).map((item) => item.identifier);
@@ -240,29 +300,24 @@ export async function configureNotifications(requestPermission = true): Promise<
   }
   let schedulingFailed = false;
 
-  // Native daily triggers survive long idle periods and are restored by
-  // expo-notifications after reboot. They also avoid a large rolling set of
-  // one-off alarms that can be pruned by aggressive Android firmware.
+  // Primaries use native daily triggers unless today is already done. Follow-ups use dated
+  // triggers because a daily alarm cannot be canceled for today alone.
   for (const plan of plans) {
     try {
       await Notifications.scheduleNotificationAsync({
         identifier: plan.identifier,
         content: contentFor(plan),
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.DAILY,
-          hour: plan.hour,
-          minute: plan.minute,
-          channelId: CHANNEL_ID,
-        },
+        trigger: plan.fireAt
+          ? { type: Notifications.SchedulableTriggerInputTypes.DATE, date: plan.fireAt, channelId: CHANNEL_ID }
+          : { type: Notifications.SchedulableTriggerInputTypes.DAILY, hour: plan.hour, minute: plan.minute, channelId: CHANNEL_ID },
       });
       if (plan.deliveryKind === 'primary') await setReminderNotificationId(plan.reminder.id, plan.identifier);
-      // Journal the next two occurrences so a gap in delivery is visible after the fact.
-      for (const dayOffset of [0, 1]) {
-        const at = occurrenceAt(plan.hour, plan.minute, dayOffset);
+      // Journal the next two primary occurrences, or this exact follow-up occurrence.
+      for (const at of plan.fireAt ? [plan.fireAt] : [occurrenceAt(plan.hour, plan.minute), occurrenceAt(plan.hour, plan.minute, 1)]) {
         if (at.getTime() <= Date.now()) continue;
         await recordExpectedDelivery({ reminderId: plan.reminder.id, habitId: plan.reminder.habitId, occurrenceAt: at.toISOString(), kind: plan.deliveryKind, identifier: plan.identifier });
       }
-      await addDiagnosticLog('info', 'schedule.accepted', `Scheduled ${plan.reminder.name} (${plan.deliveryKind}) for ${String(plan.hour).padStart(2, '0')}:${String(plan.minute).padStart(2, '0')} daily.`, { reminderId: plan.reminder.id, habitId: plan.reminder.habitId, identifier: plan.identifier });
+      await addDiagnosticLog('info', 'schedule.accepted', `Scheduled ${plan.reminder.name} (${plan.deliveryKind}) for ${plan.fireAt ? plan.fireAt.toLocaleString() : `${String(plan.hour).padStart(2, '0')}:${String(plan.minute).padStart(2, '0')} daily`}.`, { reminderId: plan.reminder.id, habitId: plan.reminder.habitId, identifier: plan.identifier });
     } catch (error) {
       schedulingFailed = true;
       console.error(`Could not schedule ${plan.identifier}`, error);
@@ -270,12 +325,14 @@ export async function configureNotifications(requestPermission = true): Promise<
     }
   }
 
-  // Remove only obsolete/legacy habit reminders. Snoozes and unrelated checks survive.
+  // Remove only obsolete/legacy habit reminders. Snoozes and unrelated checks survive,
+  // except a snooze for a habit that has since been completed.
   if (!schedulingFailed) {
     for (const item of scheduledBefore) {
       const data = item.content.data;
       const isManaged = data?.kind === REMINDER_KIND || item.content.categoryIdentifier === CATEGORY_ID;
-      if (isManaged && data?.kind !== 'habbitdot-snooze' && !desiredIds.has(item.identifier)) {
+      const isSnooze = data?.kind === 'habbitdot-snooze';
+      if (isManaged && (isSnooze ? satisfiedHabitIds.has(Number(data?.habitId)) : !desiredIds.has(item.identifier))) {
         await Notifications.cancelScheduledNotificationAsync(item.identifier);
       }
     }
@@ -478,9 +535,9 @@ export async function listenForNotificationActions(onChanged: () => void, onOpen
     if (!habitId) return;
     if (response.actionIdentifier === 'TAKEN') {
       await incrementEntry(habitId, localDateKey(now));
-      // The tray copy does not clear itself: the action is handled without opening the app.
+      // Android does not clear the tray copy when an action button is pressed.
       await Notifications.dismissNotificationAsync(identifier).catch(console.error);
-      await dismissRemindersFor(habitId);
+      await settleRemindersFor(habitId);
       onChanged();
     } else if (response.actionIdentifier === 'SNOOZE') {
       const reminders = await getEnabledReminders(localDateKey(now));
@@ -513,24 +570,58 @@ export async function listenForNotificationActions(onChanged: () => void, onOpen
   return { remove: () => { received.remove(); responseSubscription.remove(); } };
 }
 
-/** Clears any reminder for a habit still sitting in the tray once the dose is logged. */
-export async function dismissRemindersFor(habitId: number) {
+/**
+ * Brings today's reminders in line with a change to today's count, made in the app or from
+ * a notification. Once the habit is complete this clears tray copies, today's remaining
+ * follow-ups and any pending snooze. The primary alarm is swapped by the reconcile the
+ * caller schedules next, which also restores everything if the log is undone.
+ */
+export async function settleRemindersFor(habitId: number) {
   if (isExpoGo) return;
   try {
+    const satisfied = await alreadyLogged(habitId);
+    rememberSatisfaction(habitId, satisfied);
+    if (!satisfied) return;
     for (const item of await Notifications.getPresentedNotificationsAsync()) {
       const data = item.request.content.data;
       if (isReminderNotification(data) && Number(data.habitId) === habitId) {
         await Notifications.dismissNotificationAsync(item.request.identifier);
       }
     }
+    const today = localDateKey();
+    const cancelled: string[] = [];
+    for (const item of await Notifications.getAllScheduledNotificationsAsync()) {
+      const data = item.content.data;
+      if (!isReminderNotification(data) || Number(data.habitId) !== habitId) continue;
+      const todaysFollowup = data.deliveryKind === 'followup' && data.occurrenceDate === today;
+      if (todaysFollowup || data.deliveryKind === 'snooze') {
+        await Notifications.cancelScheduledNotificationAsync(item.identifier);
+        cancelled.push(item.identifier);
+      }
+    }
+    await forgetRemainingOccurrencesToday(habitId);
+    await addDiagnosticLog('info', 'reminders.settled', `Habit complete for today; cancelled ${cancelled.length} pending reminder(s).`, { habitId, cancelled });
   } catch (error) {
-    console.error('Could not dismiss presented reminders', error);
+    console.error('Could not clear reminders after logging', error);
   }
 }
 
-export async function getLastOpenedHabitId() {
+/** Occurrences cancelled because the habit is done must not later read as "never confirmed". */
+async function forgetRemainingOccurrencesToday(habitId: number) {
+  await dropScheduledDeliveries(habitId, new Date().toISOString(), occurrenceAt(0, 0, 1).toISOString());
+}
+
+/**
+ * The habit whose notification body was tapped to launch the app. Action buttons launch it
+ * too (Done opens the app on purpose) but must not navigate anywhere. The response is
+ * cleared once read so a later launch cannot replay it.
+ */
+export function getLastOpenedHabitId() {
   if (isExpoGo) return null;
-  const response = await Notifications.getLastNotificationResponseAsync();
-  const habitId = Number(response?.notification.request.content.data?.habitId);
+  const response = Notifications.getLastNotificationResponse();
+  if (!response) return null;
+  Notifications.clearLastNotificationResponse();
+  if (response.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER) return null;
+  const habitId = Number(response.notification.request.content.data?.habitId);
   return habitId || null;
 }
