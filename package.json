@@ -13,7 +13,7 @@
   ],
   "main": "index.ts",
   "dependencies": {
-    "@react-native-community/datetimepicker": "9.1.0",
+    "@react-native-community/datetimepicker": "9.2.1",
     "expo": "~57.0.21",
     "expo-constants": "~57.0.17",
     "expo-dev-client": "~57.0.18",
